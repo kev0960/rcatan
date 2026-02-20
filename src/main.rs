@@ -154,11 +154,9 @@ impl Game {
             .iter()
             .filter(|t| !t.has_robber)
             .flat_map(|t| {
-                let nodes = TILE_TO_NODE[t.tile_index as usize];
-                nodes
-                    .iter()
-                    .map(|n| (t.tile_type, &self.structure[*n as usize]))
-                    .collect::<Vec<_>>()
+                TILE_TO_NODE[t.tile_index as usize]
+                    .into_iter()
+                    .map(|n| (t.tile_type, &self.structure[n as usize]))
             })
             .filter_map(|(tile_type, structure)| structure.get().map(|b| (tile_type, b)))
             .collect::<Vec<_>>();
