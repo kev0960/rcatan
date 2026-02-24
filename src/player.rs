@@ -75,22 +75,27 @@ impl Player {
 
                 let [start, end] = &(*ROAD_TO_NODES)[road_index];
 
-                // If the "new" road goes through the other player's settlement, then we do not
-                // allow it.
-                if let Some((_, p)) = board.structure(*start).get()
-                    && p != self.id
-                    && road_node_touched.contains(start)
-                {
-                    return false;
+                // <-- Road --> (Other Settlement) <-- New Road ? -->
+                //                                     ^^^^^^^^^
+                //                                    Cannot build here
+                if road_node_touched.contains(start) {
+                    // If the new road "extension" point is occupied by the other player, then it
+                    // cannot be extended from there
+                    if let Some((_, p)) = board.structure(*start).get()
+                        && p != self.id
+                    {
+                        return false;
+                    }
                 }
 
-                // If the "new" road goes through the other player's settlement, then we do not
-                // allow it.
-                if let Some((_, p)) = board.structure(*end).get()
-                    && p != self.id
-                    && road_node_touched.contains(end)
-                {
-                    return false;
+                if road_node_touched.contains(end) {
+                    // If the new road "extension" point is occupied by the other player, then it
+                    // cannot be extended from there
+                    if let Some((_, p)) = board.structure(*end).get()
+                        && p != self.id
+                    {
+                        return false;
+                    }
                 }
 
                 true
@@ -216,8 +221,12 @@ mod tests {
     use super::*;
     use crate::board::{Road, Structure};
 
-    fn p0() -> PlayerId { PlayerId::new(0) }
-    fn p1() -> PlayerId { PlayerId::new(1) }
+    fn p0() -> PlayerId {
+        PlayerId::new(0)
+    }
+    fn p1() -> PlayerId {
+        PlayerId::new(1)
+    }
 
     fn make_board() -> Board {
         let mut board = Board::new(&[]);
@@ -283,11 +292,7 @@ mod tests {
     fn get_available_roads_blocked_by_opponent_structure() {
         let mut board = make_board();
         board.build_road(RoadId::new(0), p0());
-        board.build_structure(
-            NodeId::new(3),
-            p1(),
-            Building::Settlement,
-        );
+        board.build_structure(NodeId::new(3), p1(), Building::Settlement);
 
         let p = Player::new(p0());
         let roads = p.get_available_roads(&board);
@@ -300,16 +305,8 @@ mod tests {
         board.build_road(RoadId::new(57), p0());
         board.build_road(RoadId::new(51), p0());
 
-        board.build_structure(
-            NodeId::new(44),
-            p1(),
-            Building::Settlement,
-        );
-        board.build_structure(
-            NodeId::new(30),
-            p1(),
-            Building::Settlement,
-        );
+        board.build_structure(NodeId::new(44), p1(), Building::Settlement);
+        board.build_structure(NodeId::new(30), p1(), Building::Settlement);
 
         let p = Player::new(p0());
         let mut roads = p.get_available_roads(&board);
@@ -324,11 +321,7 @@ mod tests {
         board.build_road(RoadId::new(27), p0());
         board.build_road(RoadId::new(28), p0());
 
-        board.build_structure(
-            NodeId::new(23),
-            p1(),
-            Building::Settlement,
-        );
+        board.build_structure(NodeId::new(23), p1(), Building::Settlement);
         board.build_road(RoadId::new(35), p1());
 
         let p = Player::new(p0());
@@ -355,11 +348,7 @@ mod tests {
     fn get_available_nodes_respects_distance_rule() {
         let mut board = make_board();
         board.build_road(RoadId::new(0), p0());
-        board.build_structure(
-            NodeId::new(4),
-            p0(),
-            Building::Settlement,
-        );
+        board.build_structure(NodeId::new(4), p0(), Building::Settlement);
 
         let p = Player::new(p0());
         let nodes = p.get_available_nodes(&board);
@@ -369,21 +358,9 @@ mod tests {
     #[test]
     fn get_existing_settlements_finds_only_own() {
         let mut board = make_board();
-        board.build_structure(
-            NodeId::new(0),
-            p0(),
-            Building::Settlement,
-        );
-        board.build_structure(
-            NodeId::new(10),
-            p1(),
-            Building::Settlement,
-        );
-        board.build_structure(
-            NodeId::new(20),
-            p0(),
-            Building::City,
-        );
+        board.build_structure(NodeId::new(0), p0(), Building::Settlement);
+        board.build_structure(NodeId::new(10), p1(), Building::Settlement);
+        board.build_structure(NodeId::new(20), p0(), Building::City);
 
         let p = Player::new(p0());
         assert_eq!(p.get_existing_settlements(&board), [NodeId::new(0)]);
@@ -456,11 +433,7 @@ mod tests {
     #[test]
     fn get_available_actions_city() {
         let mut board = make_board();
-        board.build_structure(
-            NodeId::new(0),
-            p0(),
-            Building::Settlement,
-        );
+        board.build_structure(NodeId::new(0), p0(), Building::Settlement);
 
         let mut p = Player::new(p0());
         p.num_settlement = 1;
