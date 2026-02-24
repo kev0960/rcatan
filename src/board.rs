@@ -7,7 +7,6 @@ use crate::action::Resource;
 use crate::id::NodeId;
 use crate::id::PlayerId;
 use crate::id::RoadId;
-use crate::player::Player;
 use crate::table::TILE_TO_NODE;
 
 #[derive(Clone, Copy)]
@@ -36,6 +35,12 @@ pub struct Road {
     data: u8,
 }
 
+impl Default for Road {
+    fn default() -> Self {
+        Self { data: 0 }
+    }
+}
+
 impl Road {
     pub fn get(&self) -> Option<PlayerId> {
         if self.data & 0b0000_0100 == 0 {
@@ -60,6 +65,12 @@ pub struct Structure {
     data: u8,
 }
 
+impl Default for Structure {
+    fn default() -> Self {
+        Self { data: 0 }
+    }
+}
+
 impl Structure {
     pub fn get(&self) -> Option<(Building, PlayerId)> {
         if self.data & 0b0000_0100 == 0 {
@@ -76,8 +87,8 @@ impl Structure {
 
     pub fn set(&mut self, player: PlayerId, structure: Building) {
         let building = match structure {
-            Building::Settlement => 0b0000_1000,
-            Building::City => 0b0000_0000,
+            Building::Settlement => 0b0000_0000,
+            Building::City => 0b0000_1000,
         };
 
         self.data = u8::from(player) | building | 0b0000_0100;
@@ -137,7 +148,14 @@ impl Board {
         &self.structures[s.into()]
     }
 
-    pub fn build_structure(&mut self, n: NodeId, player: PlayerId) {}
+    pub fn build_structure(
+        &mut self,
+        n: NodeId,
+        player: PlayerId,
+        building: Building,
+    ) {
+        self.structures[usize::from(n)].set(player, building)
+    }
 
     pub fn get_matching_resources(
         &self,
@@ -173,5 +191,142 @@ impl Board {
                 })
             })
             .collect::<Vec<_>>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_board(tiles: &[(u8, TileType)]) -> Board {
+        let mut board = Board::new(tiles);
+        for _ in 0..72 {
+            board.roads.push(Road { data: 0 });
+        }
+        for _ in 0..54 {
+            board.structures.push(Structure { data: 0 });
+        }
+        board
+    }
+
+    #[test]
+    fn road_default_is_unoccupied() {
+        let road = Road { data: 0 };
+        assert_eq!(road.get(), None);
+    }
+
+    #[test]
+    fn road_set_and_get() {
+        let mut road = Road { data: 0 };
+        let player = PlayerId::new(2);
+        road.set_player(player);
+        assert_eq!(road.get(), Some(player));
+    }
+
+    #[test]
+    fn structure_default_is_empty() {
+        let s = Structure { data: 0 };
+        assert_eq!(s.get(), None);
+    }
+
+    #[test]
+    fn structure_set_settlement() {
+        let mut s = Structure { data: 0 };
+        let player = PlayerId::new(1);
+        s.set(player, Building::Settlement);
+        assert_eq!(s.get(), Some((Building::Settlement, player)));
+    }
+
+    #[test]
+    fn structure_set_city() {
+        let mut s = Structure { data: 0 };
+
+        let player = PlayerId::new(3);
+        s.set(player, Building::City);
+        assert_eq!(s.get(), Some((Building::City, player)));
+    }
+
+    #[test]
+    fn structure_upgrade_settlement_to_city() {
+        let mut s = Structure { data: 0 };
+        let player = PlayerId::new(0);
+
+        s.set(player, Building::Settlement);
+        assert_eq!(s.get(), Some((Building::Settlement, player)));
+
+        s.set(player, Building::City);
+        assert_eq!(s.get(), Some((Building::City, player)));
+    }
+
+    #[test]
+    fn build_road_on_board() {
+        let mut board = make_board(&[]);
+        let player = PlayerId::new(0);
+        let road_id = RoadId::new(5);
+
+        assert!(board.roads[5].get().is_none());
+        board.build_road(road_id, player);
+        assert_eq!(board.roads[5].get(), Some(player));
+    }
+
+    #[test]
+    fn build_structure_on_board() {
+        let mut board = make_board(&[]);
+        let player = PlayerId::new(1);
+        let node = NodeId::new(10);
+
+        assert!(board.structure(node).get().is_none());
+        board.build_structure(node, player, Building::Settlement);
+        assert_eq!(
+            board.structure(node).get(),
+            Some((Building::Settlement, player))
+        );
+    }
+
+    #[test]
+    fn get_matching_resources_empty_board() {
+        let board = make_board(&[(3, TileType::Hills)]);
+        let result = board.get_matching_resources(3);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn get_matching_resources_with_settlement() {
+        let mut board = make_board(&[(3, TileType::Forest)]);
+        let player = PlayerId::new(0);
+
+        // Tile 0 at dice=3 has nodes [0, 3, 4, 7, 8, 12].
+        // Place a settlement on node 0.
+        board.build_structure(NodeId::new(0), player, Building::Settlement);
+
+        let result = board.get_matching_resources(3);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], (player, Resource::Lumber, 1));
+    }
+
+    #[test]
+    fn get_matching_resources_city_gives_two() {
+        let mut board = make_board(&[(3, TileType::Mountains)]);
+        let player = PlayerId::new(2);
+
+        board.build_structure(NodeId::new(3), player, Building::City);
+
+        let result = board.get_matching_resources(3);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], (player, Resource::Ore, 2));
+    }
+
+    #[test]
+    fn get_matching_resources_robber_blocks() {
+        let mut board = make_board(&[(5, TileType::Fields)]);
+        let player = PlayerId::new(0);
+
+        board.build_structure(NodeId::new(0), player, Building::Settlement);
+
+        // Manually set the robber on tile 0
+        board.dice_to_tiles[(5 - 2) as usize][0].has_robber = true;
+
+        let result = board.get_matching_resources(5);
+        assert!(result.is_empty());
     }
 }

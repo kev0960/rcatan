@@ -1,4 +1,4 @@
-#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Debug)]
 pub struct Id<const COUNT: u8>(u8);
 
 impl<const COUNT: u8> Id<COUNT> {

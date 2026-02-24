@@ -1,12 +1,13 @@
 use crate::id::{NodeId, RoadId};
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Debug)]
 pub enum Building {
     Settlement,
     City,
 }
 
 #[repr(u8)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Debug)]
 pub enum Resource {
     Brick = 0,
     Lumber = 1,
@@ -15,7 +16,18 @@ pub enum Resource {
     Wool = 4,
 }
 
+impl Resource {
+    pub const ALL: [Resource; 5] = [
+        Resource::Brick,
+        Resource::Lumber,
+        Resource::Ore,
+        Resource::Grain,
+        Resource::Wool,
+    ];
+}
+
 #[repr(u8)]
+#[derive(Copy, Clone)]
 pub enum DevCard {
     Knight = 5,
     VictoryPoint = 6,
@@ -24,12 +36,14 @@ pub enum DevCard {
     Monopoly = 9,
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Action {
     BuildRoad(RoadId),
     BuildStructure(Building, NodeId),
-    BuyDevCard,
-    UseDevCard(DevCard),
+    // BuyDevCard,
+    // UseDevCard(DevCard),
 
     // Trades *not* between the player.
-    MaritimeTrade(Vec<Resource>, Resource),
+    MaritimeTrade((Resource, u8), Resource),
+    EndTurn,
 }
