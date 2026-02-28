@@ -1,9 +1,11 @@
+use std::array::from_fn;
 use std::collections::HashSet;
 
 use arrayvec::ArrayVec;
 use once_cell::sync::Lazy;
 
-use crate::id::{NodeId, RoadId};
+use crate::id::NodeId;
+use crate::id::RoadId;
 
 const fn nodes<const N: usize>(a: [u8; N]) -> [NodeId; N] {
     let mut result = [NodeId::new(0); N];
@@ -228,4 +230,71 @@ fn compute_road_to_connected_roads() -> [ArrayVec<RoadId, 4>; 72] {
         .collect::<Vec<_>>()
         .try_into()
         .unwrap()
+}
+
+pub static ROAD_TO_ROAD_CONNECTION: Lazy<RoadToRoadConnection> =
+    Lazy::new(RoadToRoadConnection::new);
+
+pub struct RoadToRoadConnection {
+    data: ArrayVec<ArrayVec<u8, 72>, 72>,
+}
+
+impl RoadToRoadConnection {
+    fn new() -> Self {
+        Self {
+            data: compute_road_to_road_intersection(),
+        }
+    }
+
+    // Use when you two roads are expected to overlap. This removes unnecessary unwrap step.
+    pub fn get(&self, a: &RoadId, b: &RoadId) -> NodeId {
+        let overlap = self.data[usize::from(*a)][usize::from(*b)];
+        debug_assert!(overlap & 0b1000_0000 != 0);
+        NodeId::from(overlap & 0b0111_1111)
+    }
+
+    pub fn maybe_get(&self, a: &RoadId, b: &RoadId) -> Option<NodeId> {
+        let overlap = self.data[usize::from(*a)][usize::from(*b)];
+        if overlap & 0b1000_0000 == 0 {
+            None
+        } else {
+            Some(NodeId::from(
+                self.data[usize::from(*a)][usize::from(*b)] & 0b0111_1111,
+            ))
+        }
+    }
+}
+
+fn compute_road_to_road_intersection() -> ArrayVec<ArrayVec<u8, 72>, 72> {
+    let mut road_to_road_connection: ArrayVec<ArrayVec<u8, 72>, 72> =
+        ArrayVec::from(from_fn(|_| ArrayVec::from([0; 72])));
+
+    for (road_id, connecting_roads) in
+        (*ROAD_TO_CONNECTED_ROADS).iter().enumerate()
+    {
+        let current_road_nodes = (*ROAD_TO_NODES)[road_id];
+        for connecting_road in connecting_roads {
+            let connecting_road_nodes =
+                &(*ROAD_TO_NODES)[usize::from(*connecting_road)];
+            let node_id =
+                get_overlap_node(&current_road_nodes, connecting_road_nodes);
+
+            road_to_road_connection[road_id][usize::from(*connecting_road)] =
+                0b1000_0000 | (u8::from(node_id));
+        }
+    }
+
+    road_to_road_connection
+}
+
+fn get_overlap_node(left: &[NodeId; 2], right: &[NodeId; 2]) -> NodeId {
+    let [l_1, l_2] = left;
+    let [r_1, r_2] = right;
+
+    if l_1 == r_1 || l_1 == r_2 {
+        *l_1
+    } else {
+        debug_assert!(l_2 == r_1 || l_2 == r_2);
+        *l_2
+    }
 }

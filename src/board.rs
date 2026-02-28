@@ -1,6 +1,8 @@
 use std::array::from_fn;
 
 use arrayvec::ArrayVec;
+use rand::seq::SliceRandom;
+use rand_chacha::ChaCha8Rng;
 
 use crate::action::Building;
 use crate::action::Resource;
@@ -9,7 +11,7 @@ use crate::id::PlayerId;
 use crate::id::RoadId;
 use crate::table::TILE_TO_NODE;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TileType {
     Hills,
     Forest,
@@ -26,6 +28,7 @@ struct Tile {
     tile_index: u8,
 }
 
+#[derive(Clone, Copy, Default)]
 pub struct Road {
     // Uses the last 3 bits
     // _____       1                  11
@@ -33,12 +36,6 @@ pub struct Road {
     // Whether the road is occupied
     //                            Who occupies
     data: u8,
-}
-
-impl Default for Road {
-    fn default() -> Self {
-        Self { data: 0 }
-    }
 }
 
 impl Road {
@@ -55,6 +52,7 @@ impl Road {
     }
 }
 
+#[derive(Clone, Copy, Default)]
 pub struct Structure {
     // Uses the last 4 bits
     // ____1       1                  11
@@ -63,12 +61,6 @@ pub struct Structure {
     // Whether the structure exists   ||
     //                            Who occupies
     data: u8,
-}
-
-impl Default for Structure {
-    fn default() -> Self {
-        Self { data: 0 }
-    }
 }
 
 impl Structure {
@@ -134,10 +126,53 @@ impl Board {
         }
 
         Self {
-            roads: ArrayVec::new(),
-            structures: ArrayVec::new(),
+            roads: ArrayVec::from([Road::default(); 72]),
+            structures: ArrayVec::from([Structure::default(); 54]),
             dice_to_tiles,
         }
+    }
+
+    pub fn new_from_rand(rng: &mut ChaCha8Rng) -> Self {
+        let tile_orders = [
+            0, 1, 2, 6, 11, 15, 18, 17, 16, 12, 7, 3, 4, 5, 10, 14, 13, 8, 9,
+        ];
+
+        let dice_digits =
+            [5, 6, 11, 5, 8, 10, 9, 2, 10, 12, 9, 8, 3, 4, 3, 4, 6, 11];
+
+        let mut resources = vec![
+            vec![TileType::Hills; 3],
+            vec![TileType::Forest; 4],
+            vec![TileType::Mountains; 3],
+            vec![TileType::Fields; 4],
+            vec![TileType::Pasture; 4],
+            vec![TileType::Desert; 1],
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+        resources.shuffle(rng);
+
+        let mut digit_index = 0;
+        let mut tiles = vec![(0, TileType::Desert); 19];
+
+        for i in 0..19 {
+            let tile_index = tile_orders[i];
+            if resources[i] == TileType::Desert {
+                // 7 gets automatically assigned to the desert.
+                tiles[tile_index].0 = 7;
+            } else {
+                tiles[tile_index] = (dice_digits[digit_index], resources[i]);
+                digit_index += 1;
+            }
+        }
+
+        Self::new(&tiles)
+    }
+
+    pub fn get_road(&self, road_id: RoadId) -> &Road {
+        &self.roads[usize::from(road_id)]
     }
 
     pub fn build_road(&mut self, r: RoadId, player: PlayerId) {
@@ -146,6 +181,10 @@ impl Board {
 
     pub fn structure(&self, s: impl Into<usize>) -> &Structure {
         &self.structures[s.into()]
+    }
+
+    pub fn get_structure(&self, node_id: NodeId) -> &Structure {
+        &self.structures[usize::from(node_id)]
     }
 
     pub fn build_structure(
@@ -198,17 +237,6 @@ impl Board {
 mod tests {
     use super::*;
 
-    fn make_board(tiles: &[(u8, TileType)]) -> Board {
-        let mut board = Board::new(tiles);
-        for _ in 0..72 {
-            board.roads.push(Road { data: 0 });
-        }
-        for _ in 0..54 {
-            board.structures.push(Structure { data: 0 });
-        }
-        board
-    }
-
     #[test]
     fn road_default_is_unoccupied() {
         let road = Road { data: 0 };
@@ -260,7 +288,7 @@ mod tests {
 
     #[test]
     fn build_road_on_board() {
-        let mut board = make_board(&[]);
+        let mut board = Board::new(&[]);
         let player = PlayerId::new(0);
         let road_id = RoadId::new(5);
 
@@ -271,7 +299,7 @@ mod tests {
 
     #[test]
     fn build_structure_on_board() {
-        let mut board = make_board(&[]);
+        let mut board = Board::new(&[]);
         let player = PlayerId::new(1);
         let node = NodeId::new(10);
 
@@ -285,14 +313,14 @@ mod tests {
 
     #[test]
     fn get_matching_resources_empty_board() {
-        let board = make_board(&[(3, TileType::Hills)]);
+        let board = Board::new(&[(3, TileType::Hills)]);
         let result = board.get_matching_resources(3);
         assert!(result.is_empty());
     }
 
     #[test]
     fn get_matching_resources_with_settlement() {
-        let mut board = make_board(&[(3, TileType::Forest)]);
+        let mut board = Board::new(&[(3, TileType::Forest)]);
         let player = PlayerId::new(0);
 
         // Tile 0 at dice=3 has nodes [0, 3, 4, 7, 8, 12].
@@ -306,7 +334,7 @@ mod tests {
 
     #[test]
     fn get_matching_resources_city_gives_two() {
-        let mut board = make_board(&[(3, TileType::Mountains)]);
+        let mut board = Board::new(&[(3, TileType::Mountains)]);
         let player = PlayerId::new(2);
 
         board.build_structure(NodeId::new(3), player, Building::City);
@@ -318,7 +346,7 @@ mod tests {
 
     #[test]
     fn get_matching_resources_robber_blocks() {
-        let mut board = make_board(&[(5, TileType::Fields)]);
+        let mut board = Board::new(&[(5, TileType::Fields)]);
         let player = PlayerId::new(0);
 
         board.build_structure(NodeId::new(0), player, Building::Settlement);

@@ -1,4 +1,5 @@
-use crate::id::{NodeId, RoadId};
+use crate::id::NodeId;
+use crate::id::RoadId;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Debug)]
 pub enum Building {

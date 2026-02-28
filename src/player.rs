@@ -219,7 +219,6 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::{Road, Structure};
 
     fn p0() -> PlayerId {
         PlayerId::new(0)
@@ -228,16 +227,6 @@ mod tests {
         PlayerId::new(1)
     }
 
-    fn make_board() -> Board {
-        let mut board = Board::new(&[]);
-        for _ in 0..72 {
-            board.roads.push(Road::default());
-        }
-        for _ in 0..54 {
-            board.structures.push(Structure::default());
-        }
-        board
-    }
 
     #[test]
     fn new_player_has_zero_cards_and_counts() {
@@ -279,7 +268,7 @@ mod tests {
     // Road 0 connects nodes [0, 3]. Connected roads are 1 and 6.
     #[test]
     fn get_available_roads_from_single_road() {
-        let mut board = make_board();
+        let mut board = Board::new(&[]);
         board.build_road(RoadId::new(0), p0());
 
         let p = Player::new(p0());
@@ -290,7 +279,7 @@ mod tests {
 
     #[test]
     fn get_available_roads_blocked_by_opponent_structure() {
-        let mut board = make_board();
+        let mut board = Board::new(&[]);
         board.build_road(RoadId::new(0), p0());
         board.build_structure(NodeId::new(3), p1(), Building::Settlement);
 
@@ -301,7 +290,7 @@ mod tests {
 
     #[test]
     fn get_available_roads_blocked_by_opponent_structure2() {
-        let mut board = make_board();
+        let mut board = Board::new(&[]);
         board.build_road(RoadId::new(57), p0());
         board.build_road(RoadId::new(51), p0());
 
@@ -317,7 +306,7 @@ mod tests {
 
     #[test]
     fn get_available_roads_blocked_by_opponent_structure3() {
-        let mut board = make_board();
+        let mut board = Board::new(&[]);
         board.build_road(RoadId::new(27), p0());
         board.build_road(RoadId::new(28), p0());
 
@@ -334,7 +323,7 @@ mod tests {
     // Road 0 connects nodes [0, 3]. Both endpoints are available.
     #[test]
     fn get_available_nodes_from_single_road() {
-        let mut board = make_board();
+        let mut board = Board::new(&[]);
         board.build_road(RoadId::new(0), p0());
 
         let p = Player::new(p0());
@@ -346,7 +335,7 @@ mod tests {
     // Node 0's nearby nodes are [3, 4]. Structure on 4 blocks node 0.
     #[test]
     fn get_available_nodes_respects_distance_rule() {
-        let mut board = make_board();
+        let mut board = Board::new(&[]);
         board.build_road(RoadId::new(0), p0());
         board.build_structure(NodeId::new(4), p0(), Building::Settlement);
 
@@ -357,7 +346,7 @@ mod tests {
 
     #[test]
     fn get_existing_settlements_finds_only_own() {
-        let mut board = make_board();
+        let mut board = Board::new(&[]);
         board.build_structure(NodeId::new(0), p0(), Building::Settlement);
         board.build_structure(NodeId::new(10), p1(), Building::Settlement);
         board.build_structure(NodeId::new(20), p0(), Building::City);
@@ -368,14 +357,14 @@ mod tests {
 
     #[test]
     fn get_available_actions_no_resources_only_end_turn() {
-        let board = make_board();
+        let board = Board::new(&[]);
         let p = Player::new(p0());
         assert_eq!(p.get_available_actions(&board), [Action::EndTurn]);
     }
 
     #[test]
     fn get_available_actions_road_building() {
-        let mut board = make_board();
+        let mut board = Board::new(&[]);
         board.build_road(RoadId::new(0), p0());
 
         let mut p = Player::new(p0());
@@ -396,7 +385,7 @@ mod tests {
 
     #[test]
     fn get_available_actions_road_no_resources() {
-        let mut board = make_board();
+        let mut board = Board::new(&[]);
         board.build_road(RoadId::new(0), p0());
 
         let mut p = Player::new(p0());
@@ -407,7 +396,7 @@ mod tests {
 
     #[test]
     fn get_available_actions_settlement() {
-        let mut board = make_board();
+        let mut board = Board::new(&[]);
         board.build_road(RoadId::new(0), p0());
 
         let mut p = Player::new(p0());
@@ -432,7 +421,7 @@ mod tests {
 
     #[test]
     fn get_available_actions_city() {
-        let mut board = make_board();
+        let mut board = Board::new(&[]);
         board.build_structure(NodeId::new(0), p0(), Building::Settlement);
 
         let mut p = Player::new(p0());
@@ -453,7 +442,7 @@ mod tests {
 
     #[test]
     fn get_available_actions_city_requires_settlement() {
-        let board = make_board();
+        let board = Board::new(&[]);
         let mut p = Player::new(p0());
         p.add_resource_card(Resource::Ore, 3);
         p.add_resource_card(Resource::Grain, 2);
@@ -463,7 +452,7 @@ mod tests {
 
     #[test]
     fn get_available_actions_maritime_trade_4_for_1() {
-        let board = make_board();
+        let board = Board::new(&[]);
         let mut p = Player::new(p0());
         p.add_resource_card(Resource::Brick, 4);
 
@@ -484,7 +473,7 @@ mod tests {
 
     #[test]
     fn get_available_actions_no_maritime_trade_with_3() {
-        let board = make_board();
+        let board = Board::new(&[]);
         let mut p = Player::new(p0());
         p.add_resource_card(Resource::Brick, 3);
 
