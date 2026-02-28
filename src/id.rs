@@ -34,4 +34,5 @@ impl<const COUNT: u8> From<usize> for Id<COUNT> {
 
 pub type RoadId = Id<72>;
 pub type NodeId = Id<54>;
+pub type TileId = Id<19>;
 pub type PlayerId = Id<4>;

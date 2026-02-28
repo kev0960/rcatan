@@ -6,6 +6,7 @@ use once_cell::sync::Lazy;
 
 use crate::id::NodeId;
 use crate::id::RoadId;
+use crate::id::TileId;
 
 const fn nodes<const N: usize>(a: [u8; N]) -> [NodeId; N] {
     let mut result = [NodeId::new(0); N];
@@ -71,7 +72,7 @@ pub static TILE_TO_NODE: [[NodeId; 6]; 19] = [
     nodes([41, 45, 46, 49, 50, 53]),
 ];
 
-pub static EDGE_TO_TILE: Lazy<[u8; 54]> =
+pub static NODE_TO_TILE: Lazy<[ArrayVec<TileId, 3>; 54]> =
     Lazy::new(|| build_reverse_map(&TILE_TO_NODE));
 
 pub static TILE_TO_ROAD: [[RoadId; 6]; 19] = [
@@ -96,16 +97,16 @@ pub static TILE_TO_ROAD: [[RoadId; 6]; 19] = [
     roads([59, 60, 64, 65, 70, 71]),
 ];
 
-pub static ROAD_TO_TILE: Lazy<[u8; 72]> =
+pub static ROAD_TO_TILE: Lazy<[ArrayVec<TileId, 2>; 72]> =
     Lazy::new(|| build_reverse_map(&TILE_TO_ROAD));
 
-fn build_reverse_map<const N: usize, T: Into<usize> + Clone>(
+fn build_reverse_map<const N: usize, const K: usize, T: Into<usize> + Clone>(
     arr: &[[T; 6]],
-) -> [u8; N] {
-    let mut m = [0; N];
+) -> [ArrayVec<TileId, K>; N] {
+    let mut m = from_fn(|_| ArrayVec::new());
     for (i, row) in arr.iter().enumerate() {
         for idx in row {
-            m[idx.clone().into()] = i as u8;
+            m[idx.clone().into()].push(TileId::from(i));
         }
     }
     m

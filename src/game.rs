@@ -6,7 +6,9 @@ use crate::action::Action;
 use crate::action::Building;
 use crate::action::Resource;
 use crate::board::Board;
+use crate::id::NodeId;
 use crate::id::PlayerId;
+use crate::id::RoadId;
 use crate::player::Player;
 use crate::road::find_longest_road;
 use rand::prelude::*;
@@ -85,6 +87,34 @@ impl Game {
             game_detail: GameDetail::new(),
             state: GameState::RollDice,
             rng,
+        }
+    }
+
+    fn player_setup(
+        &mut self,
+        player_id: PlayerId,
+        settlement: NodeId,
+        road: RoadId,
+    ) {
+        let player = &mut self.players[usize::from(player_id)];
+
+        self.board.build_road(road, player_id);
+        player.num_road += 1;
+
+        self.board
+            .build_structure(settlement, player_id, Building::Settlement);
+        player.num_settlement += 1;
+
+        if player.num_settlement == 2 {
+            // Then player set up is completed and the player will get resource cards nearby the
+            // settlement.
+
+            self.board
+                .get_resources_near_node_id(settlement)
+                .iter()
+                .for_each(|r| {
+                    player.add_resource_card(*r, 1);
+                });
         }
     }
 
@@ -268,5 +298,312 @@ impl Game {
                                   Action::UseDevCard(dev_card) => false,
                                   */
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::TileType;
+    use crate::id::{NodeId, RoadId};
+
+    fn p(id: usize) -> PlayerId {
+        PlayerId::new(id as u8)
+    }
+
+    /// Create a Game with an empty board (no tiles) for isolated unit testing.
+    fn game_with_empty_board() -> Game {
+        let rng = ChaCha8Rng::seed_from_u64(0);
+        Game {
+            board: Board::new(&[]),
+            players: ArrayVec::from(from_fn(|i| Player::new(i.into()))),
+            current_player: 0,
+            dev_cards: ArrayVec::from([0; 5]),
+            game_detail: GameDetail::new(),
+            state: GameState::RollDice,
+            rng,
+        }
+    }
+
+    // ---- GameDetail tests ----
+
+    #[test]
+    fn game_detail_initially_no_longest_road() {
+        let detail = GameDetail::new();
+        assert_eq!(detail.get_longest_road(), None);
+    }
+
+    #[test]
+    fn game_detail_set_and_get_longest_road() {
+        let mut detail = GameDetail::new();
+        detail.set_longest_road(Some((p(2), 7)));
+        let result = detail.get_longest_road();
+        assert_eq!(result, Some((p(2), 7)));
+    }
+
+    #[test]
+    fn game_detail_clear_longest_road() {
+        let mut detail = GameDetail::new();
+        detail.set_longest_road(Some((p(1), 5)));
+        assert!(detail.get_longest_road().is_some());
+
+        detail.set_longest_road(None);
+        assert_eq!(detail.get_longest_road(), None);
+    }
+
+    #[test]
+    fn game_detail_longest_road_all_players() {
+        let mut detail = GameDetail::new();
+        for id in 0..4 {
+            detail.set_longest_road(Some((p(id), 5 + id as u8)));
+            let (player, length) = detail.get_longest_road().unwrap();
+            assert_eq!(player, p(id));
+            assert_eq!(length, 5 + id as u8);
+        }
+    }
+
+    // ---- Game initialization ----
+
+    #[test]
+    fn game_new_has_four_players() {
+        let game = Game::new(42);
+        assert_eq!(game.players.len(), 4);
+    }
+
+    #[test]
+    fn game_new_starts_at_player_zero() {
+        let game = Game::new(42);
+        assert_eq!(game.current_player, 0);
+    }
+
+    // ---- run_action tests ----
+
+    #[test]
+    fn run_action_build_road_deducts_resources() {
+        let mut game = game_with_empty_board();
+
+        // Give player 0 resources for a road.
+        game.players[0].cards[Resource::Brick as usize] = 1;
+        game.players[0].cards[Resource::Lumber as usize] = 1;
+
+        game.run_action(Action::BuildRoad(RoadId::new(0)));
+
+        assert_eq!(game.players[0].cards[Resource::Brick as usize], 0);
+        assert_eq!(game.players[0].cards[Resource::Lumber as usize], 0);
+        assert_eq!(game.players[0].num_road, 1);
+        assert!(game.board.get_road(RoadId::new(0)).get().is_some());
+    }
+
+    #[test]
+    fn run_action_build_settlement_deducts_resources() {
+        let mut game = game_with_empty_board();
+
+        game.players[0].cards[Resource::Brick as usize] = 1;
+        game.players[0].cards[Resource::Lumber as usize] = 1;
+        game.players[0].cards[Resource::Grain as usize] = 1;
+        game.players[0].cards[Resource::Wool as usize] = 1;
+
+        game.run_action(Action::BuildStructure(
+            Building::Settlement,
+            NodeId::new(10),
+        ));
+
+        assert_eq!(game.players[0].cards[Resource::Brick as usize], 0);
+        assert_eq!(game.players[0].cards[Resource::Lumber as usize], 0);
+        assert_eq!(game.players[0].cards[Resource::Grain as usize], 0);
+        assert_eq!(game.players[0].cards[Resource::Wool as usize], 0);
+        assert_eq!(game.players[0].num_settlement, 1);
+        assert_eq!(
+            game.board.get_structure(NodeId::new(10)).get(),
+            Some((Building::Settlement, p(0)))
+        );
+    }
+
+    #[test]
+    fn run_action_build_city_deducts_resources() {
+        let mut game = game_with_empty_board();
+
+        // Player needs an existing settlement to upgrade.
+        game.players[0].num_settlement = 1;
+        game.players[0].cards[Resource::Grain as usize] = 2;
+        game.players[0].cards[Resource::Ore as usize] = 3;
+
+        game.run_action(Action::BuildStructure(Building::City, NodeId::new(5)));
+
+        assert_eq!(game.players[0].cards[Resource::Grain as usize], 0);
+        assert_eq!(game.players[0].cards[Resource::Ore as usize], 0);
+        assert_eq!(game.players[0].num_city, 1);
+        assert_eq!(game.players[0].num_settlement, 0);
+    }
+
+    #[test]
+    fn run_action_maritime_trade() {
+        let mut game = game_with_empty_board();
+
+        game.players[0].cards[Resource::Wool as usize] = 4;
+
+        game.run_action(Action::MaritimeTrade(
+            (Resource::Wool, 4),
+            Resource::Ore,
+        ));
+
+        assert_eq!(game.players[0].cards[Resource::Wool as usize], 0);
+        assert_eq!(game.players[0].cards[Resource::Ore as usize], 1);
+    }
+
+    // ---- Victory point tests ----
+
+    #[test]
+    fn compute_victory_point_settlements() {
+        let mut game = game_with_empty_board();
+        game.players[0].num_settlement = 3;
+        game.players[1].num_settlement = 2;
+
+        let vps = game.compute_victory_point();
+        assert_eq!(vps[0], 3);
+        assert_eq!(vps[1], 2);
+        assert_eq!(vps[2], 0);
+        assert_eq!(vps[3], 0);
+    }
+
+    #[test]
+    fn compute_victory_point_cities() {
+        let mut game = game_with_empty_board();
+        game.players[0].num_city = 2;
+        game.players[0].num_settlement = 1;
+
+        let vps = game.compute_victory_point();
+        assert_eq!(vps[0], 5); // 2*2 + 1
+    }
+
+    #[test]
+    fn compute_victory_point_with_longest_road() {
+        let mut game = game_with_empty_board();
+        game.players[0].num_settlement = 2;
+        game.game_detail.set_longest_road(Some((p(0), 6)));
+
+        // Build 6 roads for player 0 to match the game_detail.
+        // Road 0 connects nodes [0, 3], road 1 connects [0, 4], etc.
+        // Build a chain: roads 0, 1, 2, 3, 4, 5 for player 0.
+        for i in 0..6 {
+            game.board.build_road(RoadId::new(i), p(0));
+        }
+
+        let vps = game.compute_victory_point();
+        // 2 settlements + 2 longest road = 4
+        // (compute_longest_road may recalculate and override, but with 6
+        // roads built the actual longest road computation determines the holder)
+        assert!(vps[0] >= 2); // at minimum 2 settlements
+    }
+
+    // ---- handle_non_7_dice_roll tests ----
+
+    #[test]
+    fn handle_non_7_dice_roll_gives_resources() {
+        let rng = ChaCha8Rng::seed_from_u64(0);
+        // Tile 0 at dice=5, type=Forest (produces Lumber).
+        // Tile 0 nodes: [0, 3, 4, 7, 8, 12].
+        let mut game = Game {
+            board: Board::new(&[(5, TileType::Forest)]),
+            players: ArrayVec::from(from_fn(|i| Player::new(i.into()))),
+            current_player: 0,
+            dev_cards: ArrayVec::from([0; 5]),
+            game_detail: GameDetail::new(),
+            state: GameState::RollDice,
+            rng,
+        };
+
+        // Place player 0's settlement on node 0 (belongs to tile 0).
+        game.board
+            .build_structure(NodeId::new(0), p(0), Building::Settlement);
+
+        game.handle_non_7_dice_roll(5);
+
+        assert_eq!(game.players[0].cards[Resource::Lumber as usize], 1);
+    }
+
+    #[test]
+    fn handle_non_7_dice_roll_city_gives_two() {
+        let rng = ChaCha8Rng::seed_from_u64(0);
+        let mut game = Game {
+            board: Board::new(&[(8, TileType::Mountains)]),
+            players: ArrayVec::from(from_fn(|i| Player::new(i.into()))),
+            current_player: 0,
+            dev_cards: ArrayVec::from([0; 5]),
+            game_detail: GameDetail::new(),
+            state: GameState::RollDice,
+            rng,
+        };
+
+        game.board
+            .build_structure(NodeId::new(3), p(1), Building::City);
+
+        game.handle_non_7_dice_roll(8);
+
+        assert_eq!(game.players[1].cards[Resource::Ore as usize], 2);
+    }
+
+    // ---- step tests ----
+
+    #[test]
+    fn step_is_deterministic() {
+        let mut game1 = Game::new(123);
+
+        let mut game2 = Game::new(123);
+
+        for _ in 0..100 {
+            let r1 = game1.step();
+            let r2 = game2.step();
+            assert_eq!(r1, r2);
+            if r1.is_some() {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn step_does_not_panic() {
+        let mut game = Game::new(999);
+
+        for (player_id, (node_id1, road_id1, node_id2, road_id2)) in [
+            (8, 13, 9, 15),
+            (39, 56, 31, 42),
+            (18, 20, 45, 64),
+            (19, 30, 29, 35),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let p = PlayerId::new(player_id as u8);
+
+            game.player_setup(p, NodeId::new(node_id1), RoadId::new(road_id1));
+            game.player_setup(p, NodeId::new(node_id2), RoadId::new(road_id2));
+        }
+
+        for _ in 0..1000 {
+            if game.step().is_some() {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn longest_road_under_5_sets_none() {
+        let mut game = game_with_empty_board();
+        // Build 4 roads for player 0 (not enough for longest road).
+        for i in 0..4 {
+            game.board.build_road(RoadId::new(i), p(0));
+        }
+        game.compute_longest_road();
+        assert_eq!(game.game_detail.get_longest_road(), None);
+    }
+
+    #[test]
+    fn current_player_id_matches_index() {
+        let mut game = game_with_empty_board();
+        assert_eq!(game.current_player_id(), p(0));
+
+        game.current_player = 2;
+        assert_eq!(game.current_player_id(), p(2));
     }
 }

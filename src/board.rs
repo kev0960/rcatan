@@ -1,4 +1,5 @@
 use std::array::from_fn;
+use std::collections::HashMap;
 
 use arrayvec::ArrayVec;
 use rand::seq::SliceRandom;
@@ -9,9 +10,10 @@ use crate::action::Resource;
 use crate::id::NodeId;
 use crate::id::PlayerId;
 use crate::id::RoadId;
+use crate::table::NODE_TO_TILE;
 use crate::table::TILE_TO_NODE;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TileType {
     Hills,
     Forest,
@@ -21,14 +23,14 @@ pub enum TileType {
     Desert,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct Tile {
     tile_type: TileType,
     has_robber: bool,
     tile_index: u8,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct Road {
     // Uses the last 3 bits
     // _____       1                  11
@@ -52,7 +54,7 @@ impl Road {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct Structure {
     // Uses the last 4 bits
     // ____1       1                  11
@@ -99,6 +101,7 @@ impl Structure {
 //  -- Is the given edge occupied?
 //  ==> Need a mapping between the edge and the occupancy (user)
 
+#[derive(Debug)]
 pub struct Board {
     // Coord to road.
     pub roads: ArrayVec<Road, 72>,
@@ -109,6 +112,8 @@ pub struct Board {
     // Dice number to the tiles.
     // 2 to 12.
     dice_to_tiles: ArrayVec<ArrayVec<Tile, 2>, 11>,
+
+    tiles: ArrayVec<TileType, 19>,
 }
 
 impl Board {
@@ -129,6 +134,7 @@ impl Board {
             roads: ArrayVec::from([Road::default(); 72]),
             structures: ArrayVec::from([Structure::default(); 54]),
             dice_to_tiles,
+            tiles: ArrayVec::from_iter(tiles.iter().map(|(_, t)| *t)),
         }
     }
 
@@ -196,6 +202,17 @@ impl Board {
         self.structures[usize::from(n)].set(player, building)
     }
 
+    pub fn get_resources_near_node_id(&self, node_id: NodeId) -> Vec<Resource> {
+        let tile_ids = &NODE_TO_TILE[usize::from(node_id)];
+
+        tile_ids
+            .into_iter()
+            .filter_map(|id| {
+                tile_type_to_resource(self.tiles[usize::from(*id)])
+            })
+            .collect()
+    }
+
     pub fn get_matching_resources(
         &self,
         dice: u8,
@@ -212,14 +229,8 @@ impl Board {
             })
             .filter_map(|(tile_type, structure)| {
                 structure.get().map(|(building, player)| {
-                    let resource = match tile_type {
-                        TileType::Hills => Resource::Brick,
-                        TileType::Forest => Resource::Lumber,
-                        TileType::Mountains => Resource::Ore,
-                        TileType::Fields => Resource::Grain,
-                        TileType::Pasture => Resource::Wool,
-                        TileType::Desert => panic!("Not possible"),
-                    };
+                    let resource =
+                        tile_type_to_resource(tile_type).expect("not possible");
 
                     let num_cards = match building {
                         Building::Settlement => 1,
@@ -230,6 +241,17 @@ impl Board {
                 })
             })
             .collect::<Vec<_>>()
+    }
+}
+
+fn tile_type_to_resource(tile_type: TileType) -> Option<Resource> {
+    match tile_type {
+        TileType::Hills => Some(Resource::Brick),
+        TileType::Forest => Some(Resource::Lumber),
+        TileType::Mountains => Some(Resource::Ore),
+        TileType::Fields => Some(Resource::Grain),
+        TileType::Pasture => Some(Resource::Wool),
+        TileType::Desert => None,
     }
 }
 

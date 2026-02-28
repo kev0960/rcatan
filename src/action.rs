@@ -8,7 +8,7 @@ pub enum Building {
 }
 
 #[repr(u8)]
-#[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Debug)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Debug, Hash)]
 pub enum Resource {
     Brick = 0,
     Lumber = 1,
