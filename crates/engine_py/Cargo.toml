@@ -1,0 +1,11 @@
+[package]
+name = "engine_py"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "catan_engine"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = "0.28.2"
