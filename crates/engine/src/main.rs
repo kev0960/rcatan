@@ -2,6 +2,7 @@ use crate::game::Game;
 
 mod action;
 mod board;
+mod engine;
 mod game;
 mod id;
 mod player;
