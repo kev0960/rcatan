@@ -39,8 +39,8 @@ pub enum DevCard {
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Action {
-    BuildRoad(RoadId),
-    BuildStructure(Building, NodeId),
+    BuildRoad(RoadId),                // 72
+    BuildStructure(Building, NodeId), // 54 * 2
     // BuyDevCard,
     // UseDevCard(DevCard),
 
