@@ -10,6 +10,7 @@ use crate::board::Board;
 use crate::id::NodeId;
 use crate::id::PlayerId;
 use crate::id::RoadId;
+use crate::table::NODE_TO_CONTAINING_ROADS;
 use crate::table::NODE_TO_NEARBY_NODES;
 use crate::table::ROAD_TO_CONNECTED_ROADS;
 use crate::table::ROAD_TO_NODES;
@@ -136,6 +137,53 @@ impl Player {
             .collect::<Vec<_>>()
     }
 
+    pub fn get_available_nodes_for_initial_board_setup(
+        &self,
+        board: &Board,
+    ) -> Vec<NodeId> {
+        (0..54)
+            .map(NodeId::new)
+            .filter(|n| board.structure(*n).get().is_none())
+            .filter(|n| {
+                // For each node that is not occupied, check the nearby nodes.
+                // the nearby node should not be occupied as well.
+                (*NODE_TO_NEARBY_NODES)[usize::from(*n)]
+                    .iter()
+                    .all(|n| board.structure(*n).get().is_none())
+            })
+            .collect::<Vec<_>>()
+    }
+
+    pub fn get_available_roads_for_inital_board_setup(
+        &self,
+        board: &Board,
+    ) -> Vec<RoadId> {
+        println!("ID {:?}", self.id);
+        for (i, s) in board.structures.iter().enumerate() {
+            if let Some((_, p)) = s.get()
+                && p == self.id
+            {
+                println!("S: {:?}", s.get());
+                // Find the structure that is owned by the player that does not have a connecting
+                // road yet.
+                let nearby_road_occupied = &(*NODE_TO_CONTAINING_ROADS)[i]
+                    .iter()
+                    .any(|r| board.get_road(*r).get().is_some());
+
+                if *nearby_road_occupied {
+                    println!("Alreayd occupied! {}", i);
+                    continue;
+                }
+
+                return Vec::from_iter(
+                    (*NODE_TO_CONTAINING_ROADS)[i].iter().copied(),
+                );
+            }
+        }
+
+        vec![]
+    }
+
     pub fn get_existing_settlements(&self, board: &Board) -> Vec<NodeId> {
         board
             .structures
@@ -226,7 +274,6 @@ mod tests {
     fn p1() -> PlayerId {
         PlayerId::new(1)
     }
-
 
     #[test]
     fn new_player_has_zero_cards_and_counts() {
@@ -478,5 +525,113 @@ mod tests {
         p.add_resource_card(Resource::Brick, 3);
 
         assert_eq!(p.get_available_actions(&board), [Action::EndTurn]);
+    }
+
+    // ---- get_available_nodes_for_initial_board_setup tests ----
+
+    #[test]
+    fn initial_board_setup_all_nodes_available_on_empty_board() {
+        let board = Board::new(&[]);
+        let p = Player::new(p0());
+
+        let nodes = p.get_available_nodes_for_initial_board_setup(&board);
+        assert_eq!(nodes.len(), 54);
+    }
+
+    #[test]
+    fn initial_board_setup_excludes_occupied_and_nearby_nodes() {
+        let mut board = Board::new(&[]);
+        // Place a settlement at node 0. Node 0's nearby nodes are [3, 4].
+        board.build_structure(NodeId::new(0), p1(), Building::Settlement);
+
+        let p = Player::new(p0());
+        let nodes = p.get_available_nodes_for_initial_board_setup(&board);
+
+        // Node 0 is occupied, nodes 3 and 4 are nearby — all three excluded.
+        assert!(!nodes.contains(&NodeId::new(0)));
+        assert!(!nodes.contains(&NodeId::new(3)));
+        assert!(!nodes.contains(&NodeId::new(4)));
+        assert_eq!(nodes.len(), 54 - 3);
+    }
+
+    #[test]
+    fn initial_board_setup_multiple_settlements_exclude_correctly() {
+        let mut board = Board::new(&[]);
+        // Node 0 nearby: [3, 4]. Node 7 nearby: [3, 11, 12].
+        board.build_structure(NodeId::new(0), p0(), Building::Settlement);
+        board.build_structure(NodeId::new(7), p1(), Building::Settlement);
+
+        let p = Player::new(p0());
+        let nodes = p.get_available_nodes_for_initial_board_setup(&board);
+
+        for n in [0, 3, 4, 7, 11, 12] {
+            assert!(
+                !nodes.contains(&NodeId::new(n)),
+                "node {} should be excluded",
+                n
+            );
+        }
+        // Node 3 is nearby both 0 and 7, but deduplication doesn't matter for count.
+        // Excluded: 0, 3, 4, 7, 11, 12 = 6 unique nodes.
+        assert_eq!(nodes.len(), 54 - 6);
+    }
+
+    // ---- get_available_roads_for_inital_board_setup tests ----
+
+    #[test]
+    fn initial_road_setup_returns_roads_around_settlement() {
+        let mut board = Board::new(&[]);
+        // Place player 0's settlement at node 0 (containing roads: [0, 1]).
+        board.build_structure(NodeId::new(0), p0(), Building::Settlement);
+
+        let p = Player::new(p0());
+        let mut roads = p.get_available_roads_for_inital_board_setup(&board);
+        roads.sort();
+
+        assert_eq!(roads, [RoadId::new(0), RoadId::new(1)]);
+    }
+
+    #[test]
+    fn initial_road_setup_skips_settlement_with_existing_road() {
+        let mut board = Board::new(&[]);
+        // Player 0 has two settlements: node 0 and node 10.
+        board.build_structure(NodeId::new(0), p0(), Building::Settlement);
+        board.build_structure(NodeId::new(10), p0(), Building::Settlement);
+
+        // Build a road next to node 0 — now node 0's settlement is "complete".
+        board.build_road(RoadId::new(0), p0());
+
+        let p = Player::new(p0());
+        let mut roads = p.get_available_roads_for_inital_board_setup(&board);
+        roads.sort();
+
+        // Should only return roads around node 10, not node 0.
+        let expected: Vec<RoadId> =
+            NODE_TO_CONTAINING_ROADS[10].iter().copied().collect();
+        let mut expected_sorted = expected;
+        expected_sorted.sort();
+
+        assert_eq!(roads, expected_sorted);
+    }
+
+    #[test]
+    fn initial_road_setup_ignores_other_players_settlements() {
+        let mut board = Board::new(&[]);
+        // Player 1's settlement at node 0.
+        board.build_structure(NodeId::new(0), p1(), Building::Settlement);
+        // Player 0's settlement at node 10.
+        board.build_structure(NodeId::new(10), p0(), Building::Settlement);
+
+        let p = Player::new(p0());
+        let mut roads = p.get_available_roads_for_inital_board_setup(&board);
+        roads.sort();
+
+        // Should only return roads around node 10 (player 0's settlement).
+        let expected: Vec<RoadId> =
+            NODE_TO_CONTAINING_ROADS[10].iter().copied().collect();
+        let mut expected_sorted = expected;
+        expected_sorted.sort();
+
+        assert_eq!(roads, expected_sorted);
     }
 }

@@ -9,6 +9,7 @@ use crate::board::Board;
 use crate::id::NodeId;
 use crate::id::PlayerId;
 use crate::id::RoadId;
+use crate::player;
 use crate::player::Player;
 use crate::road::find_longest_road;
 use rand::prelude::*;
@@ -55,7 +56,17 @@ impl GameDetail {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 enum GameState {
+    // Initial board set up. Keeps track of the current order.
+    //
+    // (0, 1), (2, 3), (4, 5), (6, 7): Player 1 to 4 placement (settlement,
+    // road).
+    //
+    // (8, 9), (10, 11), (12, 13), (14, 15): Player 4 to 1 placement
+    // (settlement, road).
+    InitialBoardSetup(u8),
+
     // current player should roll the dice.
     RollDice,
     // current player should continue action.
@@ -85,7 +96,7 @@ impl Game {
             current_player: 0,
             dev_cards: ArrayVec::from([0; 5]),
             game_detail: GameDetail::new(),
-            state: GameState::RollDice,
+            state: GameState::InitialBoardSetup(0),
             rng,
         }
     }
@@ -120,25 +131,21 @@ impl Game {
 
     // Run "one step". Returns the player id when the game is ended. Otherwise returns None.
     pub fn step(&mut self) -> Option<PlayerId> {
-        match self.state {
-            GameState::RollDice => {
-                let dice =
-                    self.rng.random_range(1..=6) + self.rng.random_range(1..=6);
+        if let GameState::RollDice = self.state {
+            let dice =
+                self.rng.random_range(1..=6) + self.rng.random_range(1..=6);
 
-                if dice == 7 {
-                    // No-op for now.
-                    self.current_player = (self.current_player + 1) % 4;
-                    return None;
-                }
-
-                self.handle_non_7_dice_roll(dice);
-                self.state = GameState::ContinueAction;
+            if dice == 7 {
+                // No-op for now.
+                self.current_player = (self.current_player + 1) % 4;
+                return None;
             }
-            GameState::ContinueAction => {}
+
+            self.handle_non_7_dice_roll(dice);
+            self.state = GameState::ContinueAction;
         };
 
-        let mut actions = self.players[self.current_player]
-            .get_available_actions(&self.board);
+        let mut actions = self.get_actions();
 
         let action_index = self.rng.random_range(0..actions.len());
         let action = actions.swap_remove(action_index);
@@ -164,6 +171,29 @@ impl Game {
         }
 
         None
+    }
+
+    pub fn get_actions(&self) -> Vec<Action> {
+        let current_player = self.current_player_ref();
+        if let GameState::InitialBoardSetup(current_order) = self.state {
+            if current_order % 2 == 0 {
+                // Build the settlement.
+                current_player
+                    .get_available_nodes_for_initial_board_setup(&self.board)
+                    .into_iter()
+                    .map(|n| Action::BuildStructure(Building::Settlement, n))
+                    .collect()
+            } else {
+                // Build the road.
+                current_player
+                    .get_available_roads_for_inital_board_setup(&self.board)
+                    .into_iter()
+                    .map(Action::BuildRoad)
+                    .collect()
+            }
+        } else {
+            current_player.get_available_actions(&self.board)
+        }
     }
 
     fn handle_non_7_dice_roll(&mut self, dice: u8) {
@@ -238,11 +268,28 @@ impl Game {
     }
 
     fn current_player_id(&self) -> PlayerId {
-        PlayerId::from(self.current_player)
+        match self.state {
+            GameState::InitialBoardSetup(current_order) => {
+                let player_id = match current_order {
+                    0..=7 => usize::from(current_order / 2),
+                    8..=15 => usize::from(3 - (current_order - 8) / 2),
+                    _ => unreachable!(),
+                };
+
+                PlayerId::from(player_id)
+            }
+            _ => PlayerId::from(self.current_player),
+        }
     }
 
     fn current_player_mut(&mut self) -> &mut Player {
-        &mut self.players[self.current_player]
+        let player_id = usize::from(self.current_player_id());
+        &mut self.players[player_id]
+    }
+
+    fn current_player_ref(&self) -> &Player {
+        let player_id = usize::from(self.current_player_id());
+        &self.players[player_id]
     }
 
     fn run_action(&mut self, action: Action) {
@@ -250,22 +297,50 @@ impl Game {
             Action::BuildRoad(r) => {
                 self.board.build_road(r, self.current_player_id());
 
+                let game_state = self.state;
+
                 let current_player = self.current_player_mut();
                 current_player.num_road += 1;
 
-                current_player.cards[Resource::Brick as usize] -= 1;
-                current_player.cards[Resource::Lumber as usize] -= 1;
+                if let GameState::InitialBoardSetup(current_order) = game_state
+                {
+                    // Resources are not consumed during initial board setup.
+                    if current_order == 15 {
+                        self.state = GameState::RollDice;
+                    } else {
+                        self.state =
+                            GameState::InitialBoardSetup(current_order + 1);
+                    }
+                } else {
+                    current_player.cards[Resource::Brick as usize] -= 1;
+                    current_player.cards[Resource::Lumber as usize] -= 1;
+                }
             }
             Action::BuildStructure(building, node_id) => {
+                let game_state = self.state;
+
                 let current_player = self.current_player_mut();
                 match building {
                     Building::Settlement => {
                         current_player.num_settlement += 1;
 
-                        current_player.cards[Resource::Brick as usize] -= 1;
-                        current_player.cards[Resource::Lumber as usize] -= 1;
-                        current_player.cards[Resource::Grain as usize] -= 1;
-                        current_player.cards[Resource::Wool as usize] -= 1;
+                        if let GameState::InitialBoardSetup(current_order) =
+                            game_state
+                        {
+                            if current_order == 15 {
+                                self.state = GameState::RollDice;
+                            } else {
+                                self.state = GameState::InitialBoardSetup(
+                                    current_order + 1,
+                                );
+                            }
+                        } else {
+                            current_player.cards[Resource::Brick as usize] -= 1;
+                            current_player.cards[Resource::Lumber as usize] -=
+                                1;
+                            current_player.cards[Resource::Grain as usize] -= 1;
+                            current_player.cards[Resource::Wool as usize] -= 1;
+                        }
                     }
                     Building::City => {
                         current_player.num_city += 1;
