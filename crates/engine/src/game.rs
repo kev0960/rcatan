@@ -66,7 +66,9 @@ enum GameState {
     // Dice 7 rolled phase.
     //  -- Actions are "discard" untill all players > 7 cards discards resources.
     //  -- then the "player" will be able to move the robber.
-    Dice7Rolled(PlayerId),
+    //
+    // The array tracks the number of cards that each player should have after discarding.
+    Dice7Rolled((PlayerId, [u8; 4])),
 
     StealResourceAfterRobber,
 
@@ -138,18 +140,35 @@ impl Game {
                 self.rng.random_range(1..=6) + self.rng.random_range(1..=6);
 
             if dice == 7 {
-                self.state =
-                    GameState::Dice7Rolled(PlayerId::from(self.current_player));
+                let mut target_resource_num = [0; 4];
+                for player in &self.players {
+                    if player.num_resource_cards() > 7 {
+                        target_resource_num[usize::from(player.id)] =
+                            player.num_resource_cards().div_ceil(2);
+                    } else {
+                        target_resource_num[usize::from(player.id)] =
+                            player.num_resource_cards();
+                    }
+                }
+
+                self.state = GameState::Dice7Rolled((
+                    PlayerId::from(self.current_player),
+                    target_resource_num,
+                ));
             } else {
                 self.handle_non_7_dice_roll(dice);
                 self.state = GameState::ContinueAction;
             }
         };
 
-        if let GameState::Dice7Rolled(player) = self.state {
+        if let GameState::Dice7Rolled((player, target_resource_num)) =
+            self.state
+        {
             // Find the player with the card > 7.
             for player in &self.players {
-                if player.num_resource_cards() > 7 {
+                if player.num_resource_cards()
+                    > target_resource_num[usize::from(player.id)]
+                {
                     self.current_player = player.id.into();
 
                     return player
@@ -734,15 +753,15 @@ mod tests {
             current_player: 0,
             dev_cards: ArrayVec::from([0; 5]),
             game_detail: GameDetail::new(),
-            state: GameState::Dice7Rolled(p(0)), // Player 0 rolled a 7
+            state: GameState::Dice7Rolled((p(0), [0, 4, 5, 0])), // Player 0 rolled a 7
             rng,
         };
 
-        // Player 1: 8 resource cards (must discard down to 7).
+        // Player 1: 8 resource cards (must discard half, down to 4).
         game.players[1].add_resource_card(Resource::Brick, 4);
         game.players[1].add_resource_card(Resource::Lumber, 4);
 
-        // Player 2: 9 resource cards (must discard down to 7).
+        // Player 2: 9 resource cards (must discard half, down to 5).
         game.players[2].add_resource_card(Resource::Ore, 5);
         game.players[2].add_resource_card(Resource::Grain, 4);
 
@@ -752,29 +771,47 @@ mod tests {
 
         // --- Phase 1: Discard ---
 
-        // Player 1 (8 cards > 7) should discard first.
+        // Player 1 (8 cards, target 4) should discard first.
         let actions = game.get_actions();
-        assert!(actions.iter().all(|a| matches!(a, Action::DiscardResource(_))));
+        assert!(
+            actions
+                .iter()
+                .all(|a| matches!(a, Action::DiscardResource(_)))
+        );
         assert_eq!(game.current_player, 1);
 
         game.run_action(Action::DiscardResource(Resource::Brick));
         assert_eq!(game.players[1].num_resource_cards(), 7);
 
-        // Player 2 (9 cards > 7) should discard next.
+        game.run_action(Action::DiscardResource(Resource::Brick));
+        assert_eq!(game.players[1].num_resource_cards(), 6);
+
+        game.run_action(Action::DiscardResource(Resource::Brick));
+        assert_eq!(game.players[1].num_resource_cards(), 5);
+
+        game.run_action(Action::DiscardResource(Resource::Brick));
+        assert_eq!(game.players[1].num_resource_cards(), 4);
+
+        // Player 2 (9 cards, target 5) should discard next.
         let actions = game.get_actions();
-        assert!(actions.iter().all(|a| matches!(a, Action::DiscardResource(_))));
+        assert!(
+            actions
+                .iter()
+                .all(|a| matches!(a, Action::DiscardResource(_)))
+        );
         assert_eq!(game.current_player, 2);
 
         game.run_action(Action::DiscardResource(Resource::Ore));
         assert_eq!(game.players[2].num_resource_cards(), 8);
 
-        // Player 2 still has 8 > 7, must discard again.
-        let actions = game.get_actions();
-        assert!(actions.iter().all(|a| matches!(a, Action::DiscardResource(_))));
-        assert_eq!(game.current_player, 2);
-
         game.run_action(Action::DiscardResource(Resource::Ore));
         assert_eq!(game.players[2].num_resource_cards(), 7);
+
+        game.run_action(Action::DiscardResource(Resource::Ore));
+        assert_eq!(game.players[2].num_resource_cards(), 6);
+
+        game.run_action(Action::DiscardResource(Resource::Ore));
+        assert_eq!(game.players[2].num_resource_cards(), 5);
 
         // --- Phase 2: Move Robber ---
 
@@ -795,6 +832,6 @@ mod tests {
 
         // Player 0 gained one card, player 2 lost one.
         assert_eq!(game.players[0].num_resource_cards(), 1);
-        assert_eq!(game.players[2].num_resource_cards(), 6);
+        assert_eq!(game.players[2].num_resource_cards(), 4);
     }
 }
