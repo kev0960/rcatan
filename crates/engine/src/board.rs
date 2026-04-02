@@ -9,6 +9,7 @@ use crate::action::Resource;
 use crate::id::NodeId;
 use crate::id::PlayerId;
 use crate::id::RoadId;
+use crate::id::TileId;
 use crate::table::NODE_TO_TILE;
 use crate::table::TILE_TO_NODE;
 
@@ -26,7 +27,7 @@ pub enum TileType {
 struct Tile {
     tile_type: TileType,
     has_robber: bool,
-    tile_index: u8,
+    tile_index: TileId,
 }
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -124,8 +125,8 @@ impl Board {
             let (dice, tile_type) = *tile;
             dice_to_tiles[(dice - 2) as usize].push(Tile {
                 tile_type,
-                has_robber: false,
-                tile_index: tile_index as u8,
+                has_robber: tile_type == TileType::Desert,
+                tile_index: TileId::from(tile_index),
             });
         }
 
@@ -134,6 +135,44 @@ impl Board {
             structures: ArrayVec::from([Structure::default(); 54]),
             dice_to_tiles,
             tiles: ArrayVec::from_iter(tiles.iter().map(|(_, t)| *t)),
+        }
+    }
+
+    pub fn get_tile_without_robber(&self) -> ArrayVec<TileId, 18> {
+        let mut v = ArrayVec::<TileId, 18>::new();
+
+        for tiles in &self.dice_to_tiles {
+            for t in tiles {
+                if !t.has_robber {
+                    v.push(t.tile_index);
+                }
+            }
+        }
+
+        v
+    }
+
+    pub fn get_robber_position(&self) -> TileId {
+        for tiles in &self.dice_to_tiles {
+            for t in tiles {
+                if t.has_robber {
+                    return t.tile_index;
+                }
+            }
+        }
+
+        panic!("The board does not have a robber")
+    }
+
+    pub fn move_robber_to(&mut self, tile_id: TileId) {
+        for tiles in &mut self.dice_to_tiles {
+            for t in tiles {
+                if t.has_robber {
+                    t.has_robber = false;
+                } else if t.tile_index == tile_id {
+                    t.has_robber = true
+                }
+            }
         }
     }
 
@@ -222,7 +261,7 @@ impl Board {
             .iter()
             .filter(|t| !t.has_robber)
             .flat_map(|t| {
-                TILE_TO_NODE[t.tile_index as usize]
+                TILE_TO_NODE[usize::from(t.tile_index)]
                     .into_iter()
                     .map(|n| (t.tile_type, &self.structures[usize::from(n)]))
             })

@@ -1,7 +1,6 @@
 use rand::prelude::*;
-use rand::rngs::ThreadRng;
 
-pub fn choose_weighted(counts: &[u8], rng: &mut ThreadRng) -> usize {
+pub fn choose_weighted<R: Rng>(counts: &[u8], rng: &mut R) -> usize {
     let total = counts.iter().sum::<u8>();
 
     let mut r = rng.random_range(0..total);

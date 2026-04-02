@@ -1,17 +1,17 @@
+use arrayvec::ArrayVec;
 use std::array::from_fn;
 
-use arrayvec::ArrayVec;
+use crate::vecset::VecSet;
 
 use crate::action::Action;
 use crate::action::Building;
 use crate::action::Resource;
 use crate::board::Board;
-use crate::id::NodeId;
 use crate::id::PlayerId;
-use crate::id::RoadId;
-use crate::player;
 use crate::player::Player;
 use crate::road::find_longest_road;
+use crate::sample::choose_weighted;
+use crate::table::TILE_TO_NODE;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 
@@ -19,14 +19,14 @@ static WINNING_VP: u8 = 10;
 
 struct GameDetail {
     longest_road: u8,
-    largest_army: u8,
+    // largest_army: u8,
 }
 
 impl GameDetail {
     fn new() -> Self {
         Self {
             longest_road: 0,
-            largest_army: 0,
+            // largest_army: 0,
         }
     }
 
@@ -50,10 +50,6 @@ impl GameDetail {
             self.longest_road = 0;
         }
     }
-
-    fn get_largest_army() -> Option<(PlayerId, u8)> {
-        None
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -67,10 +63,21 @@ enum GameState {
     // (settlement, road).
     InitialBoardSetup(u8),
 
+    // Dice 7 rolled phase.
+    //  -- Actions are "discard" untill all players > 7 cards discards resources.
+    //  -- then the "player" will be able to move the robber.
+    Dice7Rolled(PlayerId),
+
+    StealResourceAfterRobber,
+
     // current player should roll the dice.
     RollDice,
+
     // current player should continue action.
     ContinueAction,
+
+    // Game is ended with the given winner.
+    GameEnded(PlayerId),
 }
 
 pub struct Game {
@@ -101,79 +108,107 @@ impl Game {
         }
     }
 
-    fn player_setup(
-        &mut self,
-        player_id: PlayerId,
-        settlement: NodeId,
-        road: RoadId,
-    ) {
-        let player = &mut self.players[usize::from(player_id)];
-
-        self.board.build_road(road, player_id);
-        player.num_road += 1;
-
-        self.board
-            .build_structure(settlement, player_id, Building::Settlement);
-        player.num_settlement += 1;
-
-        if player.num_settlement == 2 {
-            // Then player set up is completed and the player will get resource cards nearby the
-            // settlement.
-
-            self.board
-                .get_resources_near_node_id(settlement)
-                .iter()
-                .for_each(|r| {
-                    player.add_resource_card(*r, 1);
-                });
-        }
-    }
-
     // Run "one step". Returns the player id when the game is ended. Otherwise returns None.
     pub fn step(&mut self) -> Option<PlayerId> {
-        if let GameState::RollDice = self.state {
-            let dice =
-                self.rng.random_range(1..=6) + self.rng.random_range(1..=6);
-
-            if dice == 7 {
-                // No-op for now.
-                self.current_player = (self.current_player + 1) % 4;
-                return None;
-            }
-
-            self.handle_non_7_dice_roll(dice);
-            self.state = GameState::ContinueAction;
-        };
-
         let mut actions = self.get_actions();
 
         let action_index = self.rng.random_range(0..actions.len());
         let action = actions.swap_remove(action_index);
 
-        match action {
-            Action::EndTurn => {
-                self.current_player = (self.current_player + 1) % 4;
-                self.state = GameState::RollDice;
-                return None;
-            }
-            Action::BuildStructure(_, _) | Action::BuildRoad(_) => {
-                self.run_action(action);
+        self.run_action(action);
 
-                // Check the win condition.
-                let vps = self.compute_victory_point();
-                for (p, vp) in vps.into_iter().enumerate() {
-                    if vp >= WINNING_VP {
-                        return Some(PlayerId::from(p));
-                    }
-                }
-            }
-            action => self.run_action(action),
+        match self.state {
+            GameState::GameEnded(player) => Some(player),
+            _ => None,
         }
-
-        None
     }
 
-    pub fn get_actions(&self) -> Vec<Action> {
+    pub fn check_win_condition(&mut self) {
+        let vps = self.compute_victory_point();
+        for (p, vp) in vps.into_iter().enumerate() {
+            if vp >= WINNING_VP {
+                self.state = GameState::GameEnded(PlayerId::from(p));
+            }
+        }
+    }
+
+    pub fn get_actions(&mut self) -> Vec<Action> {
+        if let GameState::RollDice = self.state {
+            let dice =
+                self.rng.random_range(1..=6) + self.rng.random_range(1..=6);
+
+            if dice == 7 {
+                self.state =
+                    GameState::Dice7Rolled(PlayerId::from(self.current_player));
+            } else {
+                self.handle_non_7_dice_roll(dice);
+                self.state = GameState::ContinueAction;
+            }
+        };
+
+        if let GameState::Dice7Rolled(player) = self.state {
+            // Find the player with the card > 7.
+            for player in &self.players {
+                if player.num_resource_cards() > 7 {
+                    self.current_player = player.id.into();
+
+                    return player
+                        .cards
+                        .iter()
+                        .take(5)
+                        .enumerate()
+                        .filter_map(|(i, count)| match count {
+                            0 => None,
+                            _ => {
+                                Some(Action::DiscardResource(Resource::ALL[i]))
+                            }
+                        })
+                        .collect();
+                }
+            }
+
+            self.current_player = player.into();
+            self.state = GameState::StealResourceAfterRobber;
+
+            // If none of the player has more than 7, then move the robber.
+            return self
+                .board
+                .get_tile_without_robber()
+                .into_iter()
+                .map(Action::MoveRobber)
+                .collect();
+        }
+
+        if let GameState::StealResourceAfterRobber = self.state {
+            self.state = GameState::ContinueAction;
+
+            // Check the players around the new robber's location.
+            let robber_tile = self.board.get_robber_position();
+            let mut player_set = VecSet::new();
+
+            for node in TILE_TO_NODE[usize::from(robber_tile)] {
+                if let Some((_, p)) = self.board.get_structure(node).get() {
+                    if usize::from(p) == self.current_player {
+                        continue;
+                    }
+
+                    player_set.insert(usize::from(p));
+                }
+            }
+
+            if player_set.is_empty() {
+                // Just continue as a regular turn.
+                return self
+                    .current_player_ref()
+                    .get_available_actions(&self.board);
+            } else {
+                return player_set
+                    .into_iter()
+                    .map(|p| Action::StealCard(PlayerId::from(p)))
+                    .collect();
+            }
+        }
+
         let current_player = self.current_player_ref();
         if let GameState::InitialBoardSetup(current_order) = self.state {
             if current_order % 2 == 0 {
@@ -315,6 +350,8 @@ impl Game {
                     current_player.cards[Resource::Brick as usize] -= 1;
                     current_player.cards[Resource::Lumber as usize] -= 1;
                 }
+
+                self.check_win_condition();
             }
             Action::BuildStructure(building, node_id) => {
                 let game_state = self.state;
@@ -356,22 +393,37 @@ impl Game {
                     self.current_player_id(),
                     building,
                 );
+
+                self.check_win_condition();
             }
             Action::MaritimeTrade(lose, get) => {
                 let current_player = self.current_player_mut();
                 current_player.cards[lose.0 as usize] -= lose.1;
                 current_player.cards[get as usize] += 1;
             }
-            Action::EndTurn => {} /*
-                                  Action::BuyDevCard => {
-                                      let dev_card_index =
-                                          choose_weighted(&self.dev_cards, &mut self.rng);
-                                      self.dev_cards[dev_card_index] -= 1;
+            Action::DiscardResource(resource) => {
+                let current_player = self.current_player_mut();
+                current_player.cards[resource as usize] -= 1;
+            }
+            Action::MoveRobber(tile_id) => {
+                self.board.move_robber_to(tile_id);
+            }
+            Action::StealCard(player_id) => {
+                let player = &mut self.players[usize::from(player_id)];
+                if player.num_resource_cards() == 0 {
+                    return;
+                }
 
-                                      false
-                                  }
-                                  Action::UseDevCard(dev_card) => false,
-                                  */
+                let r = choose_weighted(&player.cards[0..5], &mut self.rng);
+                player.use_resource_card(Resource::ALL[r], 1);
+
+                self.current_player_mut()
+                    .add_resource_card(Resource::ALL[r], 1);
+            }
+            Action::EndTurn => {
+                self.current_player = (self.current_player + 1) % 4;
+                self.state = GameState::RollDice;
+            }
         }
     }
 }
@@ -380,7 +432,7 @@ impl Game {
 mod tests {
     use super::*;
     use crate::board::TileType;
-    use crate::id::{NodeId, RoadId};
+    use crate::id::{NodeId, RoadId, TileId};
 
     fn p(id: usize) -> PlayerId {
         PlayerId::new(id as u8)
@@ -623,7 +675,6 @@ mod tests {
     #[test]
     fn step_is_deterministic() {
         let mut game1 = Game::new(123);
-
         let mut game2 = Game::new(123);
 
         for _ in 0..100 {
@@ -639,24 +690,11 @@ mod tests {
     #[test]
     fn step_does_not_panic() {
         let mut game = Game::new(999);
-
-        for (player_id, (node_id1, road_id1, node_id2, road_id2)) in [
-            (8, 13, 9, 15),
-            (39, 56, 31, 42),
-            (18, 20, 45, 64),
-            (19, 30, 29, 35),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let p = PlayerId::new(player_id as u8);
-
-            game.player_setup(p, NodeId::new(node_id1), RoadId::new(road_id1));
-            game.player_setup(p, NodeId::new(node_id2), RoadId::new(road_id2));
-        }
-
-        for _ in 0..1000 {
+        for i in 0..1000 {
             if game.step().is_some() {
+                // This shouldn't change unless we changed some logic in the game.
+                // (to guarantee that the simulation is deterministic)
+                assert_eq!(i, 655);
                 break;
             }
         }
@@ -680,5 +718,83 @@ mod tests {
 
         game.current_player = 2;
         assert_eq!(game.current_player_id(), p(2));
+    }
+
+    // ---- Dice 7 roll sequence tests ----
+
+    #[test]
+    fn dice_7_sequence_discard_then_move_robber_then_steal() {
+        let rng = ChaCha8Rng::seed_from_u64(0);
+
+        // Tile 0: Desert (robber starts here). Nodes: [0, 3, 4, 7, 8, 12]
+        // Tile 1: Forest.                      Nodes: [1, 4, 5, 8, 9, 13]
+        let mut game = Game {
+            board: Board::new(&[(2, TileType::Desert), (5, TileType::Forest)]),
+            players: ArrayVec::from(from_fn(|i| Player::new(i.into()))),
+            current_player: 0,
+            dev_cards: ArrayVec::from([0; 5]),
+            game_detail: GameDetail::new(),
+            state: GameState::Dice7Rolled(p(0)), // Player 0 rolled a 7
+            rng,
+        };
+
+        // Player 1: 8 resource cards (must discard down to 7).
+        game.players[1].add_resource_card(Resource::Brick, 4);
+        game.players[1].add_resource_card(Resource::Lumber, 4);
+
+        // Player 2: 9 resource cards (must discard down to 7).
+        game.players[2].add_resource_card(Resource::Ore, 5);
+        game.players[2].add_resource_card(Resource::Grain, 4);
+
+        // Place player 2's settlement on tile 1 (node 1) for the steal phase.
+        game.board
+            .build_structure(NodeId::new(1), p(2), Building::Settlement);
+
+        // --- Phase 1: Discard ---
+
+        // Player 1 (8 cards > 7) should discard first.
+        let actions = game.get_actions();
+        assert!(actions.iter().all(|a| matches!(a, Action::DiscardResource(_))));
+        assert_eq!(game.current_player, 1);
+
+        game.run_action(Action::DiscardResource(Resource::Brick));
+        assert_eq!(game.players[1].num_resource_cards(), 7);
+
+        // Player 2 (9 cards > 7) should discard next.
+        let actions = game.get_actions();
+        assert!(actions.iter().all(|a| matches!(a, Action::DiscardResource(_))));
+        assert_eq!(game.current_player, 2);
+
+        game.run_action(Action::DiscardResource(Resource::Ore));
+        assert_eq!(game.players[2].num_resource_cards(), 8);
+
+        // Player 2 still has 8 > 7, must discard again.
+        let actions = game.get_actions();
+        assert!(actions.iter().all(|a| matches!(a, Action::DiscardResource(_))));
+        assert_eq!(game.current_player, 2);
+
+        game.run_action(Action::DiscardResource(Resource::Ore));
+        assert_eq!(game.players[2].num_resource_cards(), 7);
+
+        // --- Phase 2: Move Robber ---
+
+        // All discards done. Current player should be restored to player 0 (who rolled).
+        let actions = game.get_actions();
+        assert!(actions.iter().all(|a| matches!(a, Action::MoveRobber(_))));
+        assert_eq!(game.current_player, 0);
+
+        // Move robber to tile 1 (where player 2 has a settlement).
+        game.run_action(Action::MoveRobber(TileId::from(1usize)));
+
+        // --- Phase 3: Steal ---
+
+        let actions = game.get_actions();
+        assert_eq!(actions, vec![Action::StealCard(p(2))]);
+
+        game.run_action(Action::StealCard(p(2)));
+
+        // Player 0 gained one card, player 2 lost one.
+        assert_eq!(game.players[0].num_resource_cards(), 1);
+        assert_eq!(game.players[2].num_resource_cards(), 6);
     }
 }

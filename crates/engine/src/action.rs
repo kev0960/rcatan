@@ -1,5 +1,7 @@
 use crate::id::NodeId;
+use crate::id::PlayerId;
 use crate::id::RoadId;
+use crate::id::TileId;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Debug)]
 pub enum Building {
@@ -41,6 +43,11 @@ pub enum DevCard {
 pub enum Action {
     BuildRoad(RoadId),                // 72
     BuildStructure(Building, NodeId), // 54 * 2
+
+    DiscardResource(Resource),
+    MoveRobber(TileId),
+    StealCard(PlayerId),
+
     // BuyDevCard,
     // UseDevCard(DevCard),
 

@@ -9,6 +9,7 @@ mod player;
 mod road;
 mod sample;
 mod table;
+mod vecset;
 
 fn main() {
     let mut g = Game::new(1234);

@@ -1,6 +1,6 @@
-use std::collections::HashSet;
-
 use arrayvec::ArrayVec;
+
+use crate::vecset::VecSet;
 
 use crate::action::Action;
 use crate::action::Building;
@@ -16,7 +16,7 @@ use crate::table::ROAD_TO_CONNECTED_ROADS;
 use crate::table::ROAD_TO_NODES;
 
 pub struct Player {
-    id: PlayerId,
+    pub id: PlayerId,
     dev_card_bought: ArrayVec<u8, 5>,
 
     pub cards: ArrayVec<u8, 10>,
@@ -37,8 +37,20 @@ impl Player {
         }
     }
 
+    pub fn num_resource_cards(&self) -> u8 {
+        self.cards[0]
+            + self.cards[1]
+            + self.cards[2]
+            + self.cards[3]
+            + self.cards[4]
+    }
+
     pub fn add_resource_card(&mut self, resource: Resource, num_cards: u8) {
         self.cards[resource as usize] += num_cards;
+    }
+
+    pub fn use_resource_card(&mut self, resource: Resource, num_cards: u8) {
+        self.cards[resource as usize] -= num_cards;
     }
 
     pub fn add_dev_card(&mut self, dev_card: DevCard) {
@@ -57,7 +69,7 @@ impl Player {
             .collect();
 
         // All "nodes" that is covered by the player's roads.
-        let road_node_touched: HashSet<_> = roads_owned_by_player
+        let road_node_touched: VecSet<_> = roads_owned_by_player
             .iter()
             .flat_map(|&(r, _)| (*ROAD_TO_NODES)[r])
             .collect();
@@ -102,7 +114,7 @@ impl Player {
                 true
             })
             .copied()
-            .collect::<HashSet<_>>()
+            .collect::<VecSet<_>>()
             .into_iter()
             .collect()
     }
@@ -121,7 +133,7 @@ impl Player {
                     .iter()
                     .filter(|n| board.structure(**n).get().is_none())
             })
-            .collect::<HashSet<_>>()
+            .collect::<VecSet<_>>()
             .into_iter()
             // Now make sure there is no structure nearby.
             .filter_map(|n| {
@@ -158,12 +170,10 @@ impl Player {
         &self,
         board: &Board,
     ) -> Vec<RoadId> {
-        println!("ID {:?}", self.id);
         for (i, s) in board.structures.iter().enumerate() {
             if let Some((_, p)) = s.get()
                 && p == self.id
             {
-                println!("S: {:?}", s.get());
                 // Find the structure that is owned by the player that does not have a connecting
                 // road yet.
                 let nearby_road_occupied = &(*NODE_TO_CONTAINING_ROADS)[i]
@@ -171,7 +181,6 @@ impl Player {
                     .any(|r| board.get_road(*r).get().is_some());
 
                 if *nearby_road_occupied {
-                    println!("Alreayd occupied! {}", i);
                     continue;
                 }
 
