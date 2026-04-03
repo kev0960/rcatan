@@ -134,7 +134,14 @@ impl Game {
         }
     }
 
+    // Return the list of actions that the agent can do in the given game state.
+    //
+    // WARNING: This function is NOT idempotent!
+    //
+    // It modifies the game state based on the actions that are
+    // done (e.g. dice roll result)
     pub fn get_actions(&mut self) -> Vec<Action> {
+        // "RollDice" state is not a state visible to the agents.
         if let GameState::RollDice = self.state {
             let dice =
                 self.rng.random_range(1..=6) + self.rng.random_range(1..=6);
@@ -161,92 +168,98 @@ impl Game {
             }
         };
 
-        if let GameState::Dice7Rolled((player, target_resource_num)) =
-            self.state
-        {
-            // Find the player with the card > 7.
-            for player in &self.players {
-                if player.num_resource_cards()
-                    > target_resource_num[usize::from(player.id)]
-                {
-                    self.current_player = player.id.into();
+        match self.state {
+            GameState::Dice7Rolled((player, target_resource_num)) => {
+                // Find the player with the card > 7.
+                for player in &self.players {
+                    if player.num_resource_cards()
+                        > target_resource_num[usize::from(player.id)]
+                    {
+                        self.current_player = player.id.into();
 
-                    return player
-                        .cards
-                        .iter()
-                        .take(5)
-                        .enumerate()
-                        .filter_map(|(i, count)| match count {
-                            0 => None,
-                            _ => {
-                                Some(Action::DiscardResource(Resource::ALL[i]))
-                            }
-                        })
-                        .collect();
-                }
-            }
-
-            self.current_player = player.into();
-            self.state = GameState::StealResourceAfterRobber;
-
-            // If none of the player has more than 7, then move the robber.
-            return self
-                .board
-                .get_tile_without_robber()
-                .into_iter()
-                .map(Action::MoveRobber)
-                .collect();
-        }
-
-        if let GameState::StealResourceAfterRobber = self.state {
-            self.state = GameState::ContinueAction;
-
-            // Check the players around the new robber's location.
-            let robber_tile = self.board.get_robber_position();
-            let mut player_set = VecSet::new();
-
-            for node in TILE_TO_NODE[usize::from(robber_tile)] {
-                if let Some((_, p)) = self.board.get_structure(node).get() {
-                    if usize::from(p) == self.current_player {
-                        continue;
+                        return player
+                            .cards
+                            .iter()
+                            .take(5)
+                            .enumerate()
+                            .filter_map(|(i, count)| match count {
+                                0 => None,
+                                _ => Some(Action::DiscardResource(
+                                    Resource::ALL[i],
+                                )),
+                            })
+                            .collect();
                     }
+                }
 
-                    player_set.insert(usize::from(p));
+                self.current_player = player.into();
+                self.state = GameState::StealResourceAfterRobber;
+
+                // If none of the player has more than 7, then move the robber.
+                self.board
+                    .get_tile_without_robber()
+                    .into_iter()
+                    .map(Action::MoveRobber)
+                    .collect()
+            }
+            GameState::StealResourceAfterRobber => {
+                self.state = GameState::ContinueAction;
+
+                // Check the players around the new robber's location.
+                let robber_tile = self.board.get_robber_position();
+                let mut player_set = VecSet::new();
+
+                for node in TILE_TO_NODE[usize::from(robber_tile)] {
+                    if let Some((_, p)) = self.board.get_structure(node).get() {
+                        if usize::from(p) == self.current_player {
+                            continue;
+                        }
+
+                        player_set.insert(usize::from(p));
+                    }
+                }
+
+                if player_set.is_empty() {
+                    // Just continue as a regular turn.
+                    self.current_player_ref().get_available_actions(&self.board)
+                } else {
+                    player_set
+                        .into_iter()
+                        .map(|p| Action::StealCard(PlayerId::from(p)))
+                        .collect()
                 }
             }
-
-            if player_set.is_empty() {
-                // Just continue as a regular turn.
-                return self
-                    .current_player_ref()
-                    .get_available_actions(&self.board);
-            } else {
-                return player_set
-                    .into_iter()
-                    .map(|p| Action::StealCard(PlayerId::from(p)))
-                    .collect();
+            GameState::InitialBoardSetup(current_order) => {
+                let current_player = self.current_player_ref();
+                if current_order % 2 == 0 {
+                    // Build the settlement.
+                    current_player
+                        .get_available_nodes_for_initial_board_setup(
+                            &self.board,
+                        )
+                        .into_iter()
+                        .map(|n| {
+                            Action::BuildStructure(Building::Settlement, n)
+                        })
+                        .collect()
+                } else {
+                    // Build the road.
+                    current_player
+                        .get_available_roads_for_inital_board_setup(&self.board)
+                        .into_iter()
+                        .map(Action::BuildRoad)
+                        .collect()
+                }
             }
-        }
-
-        let current_player = self.current_player_ref();
-        if let GameState::InitialBoardSetup(current_order) = self.state {
-            if current_order % 2 == 0 {
-                // Build the settlement.
-                current_player
-                    .get_available_nodes_for_initial_board_setup(&self.board)
-                    .into_iter()
-                    .map(|n| Action::BuildStructure(Building::Settlement, n))
-                    .collect()
-            } else {
-                // Build the road.
-                current_player
-                    .get_available_roads_for_inital_board_setup(&self.board)
-                    .into_iter()
-                    .map(Action::BuildRoad)
-                    .collect()
+            GameState::ContinueAction => {
+                let current_player = self.current_player_ref();
+                current_player.get_available_actions(&self.board)
             }
-        } else {
-            current_player.get_available_actions(&self.board)
+            GameState::RollDice | GameState::GameEnded(_) => {
+                panic!(
+                    "Impossible game state. It should have been handled earlier"
+                );
+            }
         }
     }
 
