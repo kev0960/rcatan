@@ -110,27 +110,10 @@ impl Game {
         }
     }
 
-    // Run "one step". Returns the player id when the game is ended. Otherwise returns None.
-    pub fn step(&mut self) -> Option<PlayerId> {
-        let mut actions = self.get_actions();
-
-        let action_index = self.rng.random_range(0..actions.len());
-        let action = actions.swap_remove(action_index);
-
-        self.run_action(action);
-
+    pub fn is_game_ended(&self) -> Option<PlayerId> {
         match self.state {
             GameState::GameEnded(player) => Some(player),
             _ => None,
-        }
-    }
-
-    pub fn check_win_condition(&mut self) {
-        let vps = self.compute_victory_point();
-        for (p, vp) in vps.into_iter().enumerate() {
-            if vp >= WINNING_VP {
-                self.state = GameState::GameEnded(PlayerId::from(p));
-            }
         }
     }
 
@@ -263,103 +246,7 @@ impl Game {
         }
     }
 
-    fn handle_non_7_dice_roll(&mut self, dice: u8) {
-        assert!(dice != 7);
-
-        let resources = self.board.get_matching_resources(dice);
-
-        for (player, resource, num) in resources {
-            self.players[usize::from(player)].add_resource_card(resource, num);
-        }
-    }
-
-    fn compute_victory_point(&mut self) -> ArrayVec<u8, 4> {
-        let mut vps = ArrayVec::<u8, 4>::from([0; 4]);
-        self.compute_longest_road();
-
-        for (id, p) in self.players.iter().enumerate() {
-            vps[id] += p.num_settlement;
-            vps[id] += p.num_city * 2;
-        }
-
-        if let Some((p, _)) = self.game_detail.get_longest_road() {
-            vps[usize::from(p)] += 2;
-        }
-
-        vps
-    }
-
-    fn compute_longest_road(&mut self) {
-        let longest_road = find_longest_road(&self.board);
-        let longest_length = *longest_road.iter().max().unwrap() as u8;
-
-        if longest_length < 5 {
-            self.game_detail.set_longest_road(None);
-            return;
-        }
-
-        let current_holder = self.game_detail.get_longest_road();
-        if let Some((current_holder, _)) = current_holder {
-            let current_holder_length =
-                longest_road[usize::from(current_holder)];
-            if current_holder_length == longest_length {
-                self.game_detail
-                    .set_longest_road(Some((current_holder, longest_length)));
-                return;
-            }
-        }
-
-        // Now, the current holder is no longest the longest length holder.
-        // If there is a unique *NEW* longest holder, then that player will take the card.
-        // If there are *multiple* candidates that holds the record, then no one will take the
-        // card.
-
-        let players_with_longest_road = longest_road
-            .into_iter()
-            .enumerate()
-            .filter_map(|(p, l)| match l == longest_length {
-                true => Some(PlayerId::from(p)),
-                false => None,
-            })
-            .collect::<Vec<_>>();
-
-        if players_with_longest_road.len() > 1 {
-            self.game_detail.set_longest_road(None);
-        } else {
-            debug_assert!(players_with_longest_road.len() == 1);
-            self.game_detail.set_longest_road(Some((
-                players_with_longest_road[0],
-                longest_length,
-            )));
-        }
-    }
-
-    fn current_player_id(&self) -> PlayerId {
-        match self.state {
-            GameState::InitialBoardSetup(current_order) => {
-                let player_id = match current_order {
-                    0..=7 => usize::from(current_order / 2),
-                    8..=15 => usize::from(3 - (current_order - 8) / 2),
-                    _ => unreachable!(),
-                };
-
-                PlayerId::from(player_id)
-            }
-            _ => PlayerId::from(self.current_player),
-        }
-    }
-
-    fn current_player_mut(&mut self) -> &mut Player {
-        let player_id = usize::from(self.current_player_id());
-        &mut self.players[player_id]
-    }
-
-    fn current_player_ref(&self) -> &Player {
-        let player_id = usize::from(self.current_player_id());
-        &self.players[player_id]
-    }
-
-    fn run_action(&mut self, action: Action) {
+    pub fn run_action(&mut self, action: Action) {
         match action {
             Action::BuildRoad(r) => {
                 self.board.build_road(r, self.current_player_id());
@@ -457,6 +344,125 @@ impl Game {
                 self.state = GameState::RollDice;
             }
         }
+    }
+
+    // Run "one step". Returns the player id when the game is ended. Otherwise returns None.
+    fn step(&mut self) -> Option<PlayerId> {
+        let mut actions = self.get_actions();
+
+        let action_index = self.rng.random_range(0..actions.len());
+        let action = actions.swap_remove(action_index);
+
+        self.run_action(action);
+
+        match self.state {
+            GameState::GameEnded(player) => Some(player),
+            _ => None,
+        }
+    }
+    fn handle_non_7_dice_roll(&mut self, dice: u8) {
+        assert!(dice != 7);
+
+        let resources = self.board.get_matching_resources(dice);
+
+        for (player, resource, num) in resources {
+            self.players[usize::from(player)].add_resource_card(resource, num);
+        }
+    }
+
+    fn check_win_condition(&mut self) {
+        let vps = self.compute_victory_point();
+        for (p, vp) in vps.into_iter().enumerate() {
+            if vp >= WINNING_VP {
+                self.state = GameState::GameEnded(PlayerId::from(p));
+            }
+        }
+    }
+
+    fn compute_victory_point(&mut self) -> ArrayVec<u8, 4> {
+        let mut vps = ArrayVec::<u8, 4>::from([0; 4]);
+        self.compute_longest_road();
+
+        for (id, p) in self.players.iter().enumerate() {
+            vps[id] += p.num_settlement;
+            vps[id] += p.num_city * 2;
+        }
+
+        if let Some((p, _)) = self.game_detail.get_longest_road() {
+            vps[usize::from(p)] += 2;
+        }
+
+        vps
+    }
+
+    fn compute_longest_road(&mut self) {
+        let longest_road = find_longest_road(&self.board);
+        let longest_length = *longest_road.iter().max().unwrap() as u8;
+
+        if longest_length < 5 {
+            self.game_detail.set_longest_road(None);
+            return;
+        }
+
+        let current_holder = self.game_detail.get_longest_road();
+        if let Some((current_holder, _)) = current_holder {
+            let current_holder_length =
+                longest_road[usize::from(current_holder)];
+            if current_holder_length == longest_length {
+                self.game_detail
+                    .set_longest_road(Some((current_holder, longest_length)));
+                return;
+            }
+        }
+
+        // Now, the current holder is no longest the longest length holder.
+        // If there is a unique *NEW* longest holder, then that player will take the card.
+        // If there are *multiple* candidates that holds the record, then no one will take the
+        // card.
+
+        let players_with_longest_road = longest_road
+            .into_iter()
+            .enumerate()
+            .filter_map(|(p, l)| match l == longest_length {
+                true => Some(PlayerId::from(p)),
+                false => None,
+            })
+            .collect::<Vec<_>>();
+
+        if players_with_longest_road.len() > 1 {
+            self.game_detail.set_longest_road(None);
+        } else {
+            debug_assert!(players_with_longest_road.len() == 1);
+            self.game_detail.set_longest_road(Some((
+                players_with_longest_road[0],
+                longest_length,
+            )));
+        }
+    }
+
+    fn current_player_id(&self) -> PlayerId {
+        match self.state {
+            GameState::InitialBoardSetup(current_order) => {
+                let player_id = match current_order {
+                    0..=7 => usize::from(current_order / 2),
+                    8..=15 => usize::from(3 - (current_order - 8) / 2),
+                    _ => unreachable!(),
+                };
+
+                PlayerId::from(player_id)
+            }
+            _ => PlayerId::from(self.current_player),
+        }
+    }
+
+    fn current_player_mut(&mut self) -> &mut Player {
+        let player_id = usize::from(self.current_player_id());
+        &mut self.players[player_id]
+    }
+
+    fn current_player_ref(&self) -> &Player {
+        let player_id = usize::from(self.current_player_id());
+        &self.players[player_id]
     }
 }
 
