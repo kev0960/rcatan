@@ -51,6 +51,7 @@ name = "engine_py"
 version = "0.1.0"
 dependencies = [
  "pyo3",
+ "rcatan",
 ]
 
 [[package]]

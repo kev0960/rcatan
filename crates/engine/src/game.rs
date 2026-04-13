@@ -1,6 +1,8 @@
 use arrayvec::ArrayVec;
 use std::array::from_fn;
 
+use crate::reward::Reward;
+use crate::reward::VictoryPoint;
 use crate::vecset::VecSet;
 
 use crate::action::Action;
@@ -19,6 +21,8 @@ static WINNING_VP: u8 = 10;
 
 struct GameDetail {
     longest_road: u8,
+    // 4 bits for each player's victory points
+    vp: VictoryPoint,
     // largest_army: u8,
 }
 
@@ -26,6 +30,7 @@ impl GameDetail {
     fn new() -> Self {
         Self {
             longest_road: 0,
+            vp: VictoryPoint::new(ArrayVec::from([0; 4])),
             // largest_army: 0,
         }
     }
@@ -246,7 +251,9 @@ impl Game {
         }
     }
 
-    pub fn run_action(&mut self, action: Action) {
+    pub fn run_action(&mut self, action: Action) -> Reward {
+        let mut should_recompute_vp = false;
+
         match action {
             Action::BuildRoad(r) => {
                 self.board.build_road(r, self.current_player_id());
@@ -270,7 +277,7 @@ impl Game {
                     current_player.cards[Resource::Lumber as usize] -= 1;
                 }
 
-                self.check_win_condition();
+                should_recompute_vp = true;
             }
             Action::BuildStructure(building, node_id) => {
                 let game_state = self.state;
@@ -313,7 +320,7 @@ impl Game {
                     building,
                 );
 
-                self.check_win_condition();
+                should_recompute_vp = true;
             }
             Action::MaritimeTrade(lose, get) => {
                 let current_player = self.current_player_mut();
@@ -329,21 +336,21 @@ impl Game {
             }
             Action::StealCard(player_id) => {
                 let player = &mut self.players[usize::from(player_id)];
-                if player.num_resource_cards() == 0 {
-                    return;
+                if player.num_resource_cards() > 0 {
+                    let r = choose_weighted(&player.cards[0..5], &mut self.rng);
+                    player.use_resource_card(Resource::ALL[r], 1);
+
+                    self.current_player_mut()
+                        .add_resource_card(Resource::ALL[r], 1);
                 }
-
-                let r = choose_weighted(&player.cards[0..5], &mut self.rng);
-                player.use_resource_card(Resource::ALL[r], 1);
-
-                self.current_player_mut()
-                    .add_resource_card(Resource::ALL[r], 1);
             }
             Action::EndTurn => {
                 self.current_player = (self.current_player + 1) % 4;
                 self.state = GameState::RollDice;
             }
         }
+
+        self.compute_rewards(should_recompute_vp)
     }
 
     // Run "one step". Returns the player id when the game is ended. Otherwise returns None.
@@ -360,6 +367,7 @@ impl Game {
             _ => None,
         }
     }
+
     fn handle_non_7_dice_roll(&mut self, dice: u8) {
         assert!(dice != 7);
 
@@ -370,16 +378,28 @@ impl Game {
         }
     }
 
-    fn check_win_condition(&mut self) {
-        let vps = self.compute_victory_point();
-        for (p, vp) in vps.into_iter().enumerate() {
-            if vp >= WINNING_VP {
-                self.state = GameState::GameEnded(PlayerId::from(p));
-            }
+    fn compute_rewards(&mut self, requires_vp_recompute: bool) -> Reward {
+        let current_vps = self.game_detail.vp;
+
+        if requires_vp_recompute {
+            self.compute_victory_point();
         }
+
+        let updated_vps = self.game_detail.vp;
+
+        // Check if current player has won the game
+        let current_player = self.current_player_id();
+        if self.game_detail.vp.get_vp(current_player) >= WINNING_VP {
+            self.state = GameState::GameEnded(current_player);
+            return Reward::from_win(current_player);
+        }
+
+        // If no player has won the game, then compute the reward based on the
+        // VP changes.
+        Reward::from_vp_change(current_vps, updated_vps)
     }
 
-    fn compute_victory_point(&mut self) -> ArrayVec<u8, 4> {
+    fn compute_victory_point(&mut self) {
         let mut vps = ArrayVec::<u8, 4>::from([0; 4]);
         self.compute_longest_road();
 
@@ -392,7 +412,7 @@ impl Game {
             vps[usize::from(p)] += 2;
         }
 
-        vps
+        self.game_detail.vp = VictoryPoint::new(vps);
     }
 
     fn compute_longest_road(&mut self) {
@@ -624,11 +644,11 @@ mod tests {
         game.players[0].num_settlement = 3;
         game.players[1].num_settlement = 2;
 
-        let vps = game.compute_victory_point();
-        assert_eq!(vps[0], 3);
-        assert_eq!(vps[1], 2);
-        assert_eq!(vps[2], 0);
-        assert_eq!(vps[3], 0);
+        game.compute_victory_point();
+        assert_eq!(game.game_detail.vp.get_vp(p(0)), 3);
+        assert_eq!(game.game_detail.vp.get_vp(p(1)), 2);
+        assert_eq!(game.game_detail.vp.get_vp(p(2)), 2); // clamped to min 2
+        assert_eq!(game.game_detail.vp.get_vp(p(3)), 2); // clamped to min 2
     }
 
     #[test]
@@ -637,8 +657,8 @@ mod tests {
         game.players[0].num_city = 2;
         game.players[0].num_settlement = 1;
 
-        let vps = game.compute_victory_point();
-        assert_eq!(vps[0], 5); // 2*2 + 1
+        game.compute_victory_point();
+        assert_eq!(game.game_detail.vp.get_vp(p(0)), 5); // 2*2 + 1
     }
 
     #[test]
@@ -654,11 +674,11 @@ mod tests {
             game.board.build_road(RoadId::new(i), p(0));
         }
 
-        let vps = game.compute_victory_point();
+        game.compute_victory_point();
         // 2 settlements + 2 longest road = 4
         // (compute_longest_road may recalculate and override, but with 6
         // roads built the actual longest road computation determines the holder)
-        assert!(vps[0] >= 2); // at minimum 2 settlements
+        assert!(game.game_detail.vp.get_vp(p(0)) >= 2); 
     }
 
     // ---- handle_non_7_dice_roll tests ----

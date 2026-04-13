@@ -1,4 +1,4 @@
-use crate::{action::Action, game::Game};
+use crate::{Reward, action::Action, game::Game};
 
 pub struct Engine {
     games: Vec<Game>,
@@ -19,10 +19,12 @@ impl Engine {
         self.games.iter_mut().map(|g| g.get_actions()).collect()
     }
 
-    pub fn run_actions(&mut self, actions: Vec<Action>) {
-        for (i, action) in actions.into_iter().enumerate() {
-            self.games[i].run_action(action);
-        }
+    pub fn run_actions(&mut self, actions: Vec<Action>) -> Vec<Reward> {
+        let rewards = actions
+            .into_iter()
+            .enumerate()
+            .map(|(i, action)| self.games[i].run_action(action))
+            .collect();
 
         for i in 0..self.games.len() {
             if self.games[i].is_game_ended().is_some() {
@@ -30,6 +32,8 @@ impl Engine {
                 self.next_seed += 1;
             }
         }
+
+        rewards
     }
 }
 
