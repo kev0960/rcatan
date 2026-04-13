@@ -16,7 +16,7 @@ torch = [
 torchvision = [
   { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
-catan-engine = { path = "../crates/engine_py", editable = false }
+catan-engine = { path = "../crates/engine_py", editable = true }
 
 [tool.uv]
 dev-dependencies = ["maturin"]

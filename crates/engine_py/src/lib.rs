@@ -16,8 +16,12 @@ const NUM_ACTIONS: usize = 284;
 fn action_to_index(action: &Action) -> usize {
     match action {
         Action::BuildRoad(id) => u8::from(*id) as usize,
-        Action::BuildStructure(Building::Settlement, id) => 72 + u8::from(*id) as usize,
-        Action::BuildStructure(Building::City, id) => 126 + u8::from(*id) as usize,
+        Action::BuildStructure(Building::Settlement, id) => {
+            72 + u8::from(*id) as usize
+        }
+        Action::BuildStructure(Building::City, id) => {
+            126 + u8::from(*id) as usize
+        }
         Action::DiscardResource(r) => 180 + *r as usize,
         Action::MoveRobber(id) => 185 + u8::from(*id) as usize,
         Action::StealCard(id) => 204 + u8::from(*id) as usize,
@@ -32,8 +36,13 @@ fn action_to_index(action: &Action) -> usize {
 fn index_to_action(index: usize) -> Action {
     match index {
         0..72 => Action::BuildRoad((index as u8).into()),
-        72..126 => Action::BuildStructure(Building::Settlement, ((index - 72) as u8).into()),
-        126..180 => Action::BuildStructure(Building::City, ((index - 126) as u8).into()),
+        72..126 => Action::BuildStructure(
+            Building::Settlement,
+            ((index - 72) as u8).into(),
+        ),
+        126..180 => {
+            Action::BuildStructure(Building::City, ((index - 126) as u8).into())
+        }
         180..185 => Action::DiscardResource(Resource::ALL[index - 180]),
         185..204 => Action::MoveRobber(((index - 185) as u8).into()),
         204..208 => Action::StealCard(((index - 204) as u8).into()),
@@ -82,9 +91,18 @@ impl PyEngine {
     }
 
     /// Advance each game by one action. Takes a list of action indices (one per game).
-    fn step(&mut self, actions: Vec<usize>) {
-        let actions: Vec<Action> = actions.into_iter().map(index_to_action).collect();
-        self.inner.run_actions(actions);
+    /// Returns rewards: list[tuple[f32, f32, f32, f32]] of shape (batch_size, 4).
+    fn step(&mut self, actions: Vec<usize>) -> Vec<(f32, f32, f32, f32)> {
+        let actions: Vec<Action> =
+            actions.into_iter().map(index_to_action).collect();
+        self.inner
+            .run_actions(actions)
+            .into_iter()
+            .map(|r| {
+                let a = r.reward;
+                (a[0], a[1], a[2], a[3])
+            })
+            .collect()
     }
 }
 
