@@ -20,6 +20,7 @@ catan-engine = { path = "../crates/engine_py", editable = true }
 
 [tool.uv]
 dev-dependencies = ["maturin"]
+reinstall-package = ["catan-engine"]
 
 [tool.pyright]
 venvPath = "."

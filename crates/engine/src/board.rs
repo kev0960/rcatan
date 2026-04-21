@@ -101,7 +101,7 @@ impl Structure {
 //  -- Is the given edge occupied?
 //  ==> Need a mapping between the edge and the occupancy (user)
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Board {
     // Coord to road.
     pub roads: ArrayVec<Road, 72>,

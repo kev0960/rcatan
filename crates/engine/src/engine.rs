@@ -1,4 +1,4 @@
-use crate::{Reward, action::Action, game::Game};
+use crate::{Reward, action::Action, game::Game, state::State};
 
 pub struct Engine {
     games: Vec<Game>,
@@ -15,25 +15,37 @@ impl Engine {
         }
     }
 
+    pub fn state(&self) -> Vec<State> {
+        self.games.iter().map(|g| g.state()).collect()
+    }
+
     pub fn get_actions(&mut self) -> Vec<Vec<Action>> {
         self.games.iter_mut().map(|g| g.get_actions()).collect()
     }
 
-    pub fn run_actions(&mut self, actions: Vec<Action>) -> Vec<Reward> {
+    pub fn run_actions(
+        &mut self,
+        actions: Vec<Action>,
+    ) -> (Vec<Reward>, Vec<bool>) {
         let rewards = actions
             .into_iter()
             .enumerate()
             .map(|(i, action)| self.games[i].run_action(action))
             .collect();
 
+        let mut game_ended_mask = Vec::with_capacity(self.games.len());
+
         for i in 0..self.games.len() {
             if self.games[i].is_game_ended().is_some() {
                 self.games[i] = Game::new(self.next_seed);
                 self.next_seed += 1;
+                game_ended_mask.push(true);
+            } else {
+                game_ended_mask.push(false);
             }
         }
 
-        rewards
+        (rewards, game_ended_mask)
     }
 }
 

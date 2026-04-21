@@ -3,6 +3,7 @@ use std::array::from_fn;
 
 use crate::reward::Reward;
 use crate::reward::VictoryPoint;
+use crate::state::State;
 use crate::vecset::VecSet;
 
 use crate::action::Action;
@@ -119,6 +120,22 @@ impl Game {
         match self.state {
             GameState::GameEnded(player) => Some(player),
             _ => None,
+        }
+    }
+
+    pub fn state(&self) -> State {
+        let mut player_cards = [[0u8; 5]; 4];
+        for (i, p) in self.players.iter().enumerate() {
+            for j in 0..5 {
+                player_cards[i][j] = p.cards[j];
+            }
+        }
+
+        State {
+            current_player: self.current_player_id(),
+            board: self.board.clone(),
+            longest_road: self.game_detail.get_longest_road(),
+            player_cards,
         }
     }
 
@@ -678,7 +695,7 @@ mod tests {
         // 2 settlements + 2 longest road = 4
         // (compute_longest_road may recalculate and override, but with 6
         // roads built the actual longest road computation determines the holder)
-        assert!(game.game_detail.vp.get_vp(p(0)) >= 2); 
+        assert!(game.game_detail.vp.get_vp(p(0)) >= 2);
     }
 
     // ---- handle_non_7_dice_roll tests ----
