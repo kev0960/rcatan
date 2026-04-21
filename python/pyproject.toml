@@ -19,7 +19,11 @@ torchvision = [
 catan-engine = { path = "../crates/engine_py", editable = true }
 
 [tool.uv]
-dev-dependencies = ["maturin"]
+dev-dependencies = [
+    "maturin",
+    "pytest>=9.0.3",
+    "pytest-watcher>=0.6.3",
+]
 reinstall-package = ["catan-engine"]
 
 [tool.pyright]

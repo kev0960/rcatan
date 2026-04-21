@@ -1,7 +1,15 @@
+# PPO
+
+## Commands
+
+Running the train.
+
+```sh
+uv run python -m train
 ```
-uv python install 3.14
 
-uv venv --python 3.14
+Running the tests.
 
-uv sync
+```sh
+uv run python -m pytest
 ```

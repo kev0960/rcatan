@@ -1,6 +1,5 @@
 import numpy as np
 from catan_engine import Engine
-from python.train.__main__ import BATCH_SIZE
 from train.network import FeedForwardNN
 from torch.distributions import Categorical
 import torch
@@ -120,18 +119,21 @@ class PPO:
     #
     # Then we immediately resolve all rewards for each player.
     def compute_rewards(self):
-        actual_rewards_for_steps = dict()
+        T = len(self.buf_states)
+        B = len(self.buf_players[0])
 
-        current_per_player_rewards = [
-            np.zeros(4, dtype=np.float32) for _ in range(BATCH_SIZE)
-        ]
-        prev_player_last_action_index = [
-            [None, None, None, None] for _ in range(BATCH_SIZE)
-        ]
+        players = np.asarray(self.buf_players)
+        gamed_ended_mask = np.asarray(self.buf_game_ended_mask, dtype=bool)
 
-        for i in range(len(self.buf_states)):
+        accum = np.zeros((B, 4), dtype=np.float32)
+        prev_action_index = np.full((B, 4), -1, dtype=np.int32)
+        result = np.ndarray((T, B), dtype=np.float32)
+        b_arr = np.arange(B)
+
+        for i in range(T):
+            """
             current_players = self.buf_players[i]
-            for batch in range(BATCH_SIZE):
+            for batch in range(B):
                 current_player = current_players[batch]
 
                 last_action_index = prev_player_last_action_index[batch][current_player]
@@ -152,9 +154,34 @@ class PPO:
                 # This should be the numpy sum.
                 current_per_player_rewards[batch] += reward
                 prev_player_last_action_index[batch][current_player] = i
+            """
 
+            # Below is the vectorized version of the above.
+
+            # Pick the last action index
+            current_players = players[i]  # [B] int
+
+            # Pick the previous actions corresponding to each player.
+            prev_actions = prev_action_index[b_arr, current_players]
+
+            # We are using -1 to denote None.
+            need_to_finalize = prev_actions >= 0
+            if need_to_finalize.any():
+                batch_index_to_finalize = b_arr[need_to_finalize]
+                player_index_to_finalize = current_players[need_to_finalize]
+
+                result[
+                    prev_actions[batch_index_to_finalize], batch_index_to_finalize
+                ] = accum[batch_index_to_finalize, player_index_to_finalize]
+
+                accum[batch_index_to_finalize, player_index_to_finalize] = 0
+
+            accum += self.buf_rewards[i]
+            prev_action_index[b_arr, current_players] = i
+
+            """
             # Handle the game ending condition.
-            for batch in range(BATCH_SIZE):
+            for batch in range(B):
                 # The game is either ended or it is the last step of the batch,
                 # we have to finalize the rewards.
                 if self.buf_game_ended_mask[i][batch] or i == len(self.buf_states) - 1:
@@ -173,8 +200,30 @@ class PPO:
 
                         current_per_player_rewards[batch][player] = 0
                         prev_player_last_action_index[batch][player] = None
+            """
 
-        return actual_rewards_for_steps
+            # Below is the vectorized version of the above.
+            game_ended = gamed_ended_mask[i]
+            if i == T - 1:
+                game_ended = np.ones_like(game_ended)
+
+            # Makes (B, 4).
+            end_mask = game_ended[:, None] & (prev_action_index >= 0)
+
+            # When the game ends or the batch ends, we have to finalize all
+            # rewards.
+            if end_mask.any():
+                batch_index, player_index = np.where(end_mask)
+                print(batch_index, player_index)
+
+                result[prev_action_index[batch_index, player_index], batch_index] = (
+                    accum[batch_index, player_index]
+                )
+
+                accum[batch_index, player_index] = 0
+                prev_action_index[batch_index, player_index] = -1
+
+        return result
 
     def compute_discounted_rewards(self):
         actual_rewards_for_steps = self.compute_rewards()
@@ -182,7 +231,7 @@ class PPO:
     def step(self):
         states, players = self.engine.state()
 
-        # (BATCH_SIZE, 284) bool
+        # (batch_size, 284) bool
         masks = np.array(self.engine.get_action_mask())
 
         state_tensor = torch.tensor(np.array(states)).float().to(DEVICE)
@@ -192,7 +241,7 @@ class PPO:
         logits[~masks] = -float("inf")
         dist = Categorical(logits=logits)
 
-        # (BATCH_SIZE,)
+        # (batch_size,)
         actions = dist.sample()
         log_probs = dist.log_prob(actions)
 
