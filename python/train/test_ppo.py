@@ -30,7 +30,8 @@ def test_compute_rewards_matches_docstring_example():
     ]
     ended = [[False]] * 7
 
-    result = _make_ppo(players, rewards, ended).compute_rewards()
+    ppo = _make_ppo(players, rewards, ended)
+    result = ppo.compute_rewards()
 
     expected = np.array(
         [
@@ -52,6 +53,21 @@ def test_compute_rewards_matches_docstring_example():
     assert result.shape == (7, 1)
     np.testing.assert_allclose(result, expected, atol=1e-6)
 
+    discounted_result = ppo.compute_discounted_rewards()
+    expected = np.array(
+        [
+            [expected[0][0] + expected[6][0] * 0.99],
+            [expected[1][0] + expected[2][0] * 0.99 + expected[3][0] * 0.99**2],
+            [expected[2][0] + expected[3][0] * 0.99],
+            [expected[3][0]],
+            [expected[4][0]],
+            [expected[5][0]],
+            [expected[6][0]],
+        ]
+    )
+
+    np.testing.assert_allclose(discounted_result, expected, atol=1e-6)
+
 
 def test_compute_rewards_complex_case():
     players = [[0, 0], [1, 0], [1, 1], [1, 2], [2, 3], [3, 0], [0, 1]]
@@ -64,7 +80,8 @@ def test_compute_rewards_complex_case():
     ]
     ended = [[False, False]] * 7
 
-    result = _make_ppo(players, rewards, ended).compute_rewards()
+    ppo = _make_ppo(players, rewards, ended)
+    result = ppo.compute_rewards()
 
     expected = np.array(
         [
@@ -82,10 +99,32 @@ def test_compute_rewards_complex_case():
         dtype=np.float32,
     )
 
-    print("RESULT", result)
-    print("EXPECTED", expected)
     assert result.shape == (7, 2)
     np.testing.assert_allclose(result, expected, atol=1e-5)
+
+    discounted_result = ppo.compute_discounted_rewards()
+    expected = np.array(
+        [
+            [
+                expected[0][0] + expected[6][0] * 0.99,
+                expected[0][1] + expected[1][1] * 0.99 + expected[5][1] * 0.99**2,
+            ],
+            [
+                expected[1][0] + expected[2][0] * 0.99 + expected[3][0] * 0.99**2,
+                expected[1][1] + expected[5][1] * 0.99,
+            ],
+            [
+                expected[2][0] + expected[3][0] * 0.99,
+                expected[2][1] + expected[6][1] * 0.99,
+            ],
+            [expected[3][0], expected[3][1]],
+            [expected[4][0], expected[4][1]],
+            [expected[5][0], expected[5][1]],
+            [expected[6][0], expected[6][1]],
+        ]
+    )
+
+    np.testing.assert_allclose(discounted_result, expected, atol=1e-6)
 
 
 def test_compute_rewards_finalizes_on_game_end():
@@ -98,7 +137,8 @@ def test_compute_rewards_finalizes_on_game_end():
     ]
     ended = [[False], [False], [True], [False]]
 
-    result = _make_ppo(players, rewards, ended).compute_rewards()
+    ppo = _make_ppo(players, rewards, ended)
+    result = ppo.compute_rewards()
 
     expected = np.array(
         [
@@ -112,6 +152,17 @@ def test_compute_rewards_finalizes_on_game_end():
 
     assert result.shape == (4, 1)
     np.testing.assert_allclose(result, expected, atol=1e-6)
+
+    discounted_result = ppo.compute_discounted_rewards()
+    expected = np.array(
+        [
+            [expected[0][0] + expected[2][0] * 0.99],
+            [expected[1][0]],
+            [expected[2][0]],
+            [expected[3][0]],
+        ]
+    )
+    np.testing.assert_allclose(discounted_result, expected, atol=1e-6)
 
 
 def test_compute_rewards_handles_batch_independence():
@@ -127,7 +178,8 @@ def test_compute_rewards_handles_batch_independence():
     ]
     ended = [[False, False], [False, False], [False, False]]
 
-    result = _make_ppo(players, rewards, ended).compute_rewards()
+    ppo = _make_ppo(players, rewards, ended)
+    result = ppo.compute_rewards()
 
     # Columns are (batch=0, batch=1); both batches behave symmetrically.
     expected = np.array(
@@ -141,3 +193,16 @@ def test_compute_rewards_handles_batch_independence():
 
     assert result.shape == (3, 2)
     np.testing.assert_allclose(result, expected, atol=1e-6)
+
+    discounted_result = ppo.compute_discounted_rewards()
+    expected = np.array(
+        [
+            [
+                expected[0][0] + expected[2][0] * 0.99,
+                expected[0][1] + expected[2][1] * 0.99,
+            ],
+            [expected[1][0], expected[1][1]],
+            [expected[2][0], expected[2][1]],
+        ]
+    )
+    np.testing.assert_allclose(discounted_result, expected, atol=1e-6)

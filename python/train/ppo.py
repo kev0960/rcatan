@@ -6,6 +6,7 @@ import torch
 
 SEED = 42
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DISCOUNT_FACTOR = 0.99
 
 """
   actor  = FeedForwardNN(732, 284)   # outputs logits
@@ -226,7 +227,48 @@ class PPO:
         return result
 
     def compute_discounted_rewards(self):
+        B = len(self.buf_players[0])
+
+        # Compute the discounted rewards for each step.
         actual_rewards_for_steps = self.compute_rewards()
+
+        # Here R_i_j is the actual reward computed through compute_rewards.
+        # s_0_0, a_0_0 -> R_0_0    <-- R_0_0 + r R_0_5 + r^2 R_0_10
+        # s_1_1, a_1_1 -> R_1_1    <-- R_1_1 + r R_1_2 + r^2 R_1_6
+        # s_1_2, a_1_2 -> R_1_2    <-- R_1_2 + r R_1_6
+        # s_2_3, a_2_3 -> R_2_3    <-- R_2_3 + r R_2_7 + r^2 R_2_8
+        # s_3_4, a_3_4 -> R_3_4    <-- R_3_4 + r R_3_9
+        # s_0_5, a_0_5 -> R_0_5    <-- R_0_5 + r R_0_10
+        # s_1_6, a_1_6 -> R_1_6    <-- R_1_6
+        # s_2_7, a_2_7 -> R_2_7    <-- R_2_7 + r R_2_8
+        # s_2_8, a_2_8 -> R_2_8    <-- R_2_8
+        # s_3_9, a_3_9 -> R_3_9    <-- R_3_9
+        # s_0_10, a_0_10 -> R_0_10 <-- R_0_10
+
+        players = np.asarray(self.buf_players)
+        game_ended_mask = np.asarray(self.buf_game_ended_mask, dtype=bool)
+        accum = np.zeros((B, 4), dtype=np.float32)
+        b_arr = np.arange(B)
+
+        for i in reversed(range(len(self.buf_rewards))):
+            # Handle the game ending condition.
+            if game_ended_mask[i].any():
+                # If the game ends, reset rewards.
+                finished_batch = np.where(game_ended_mask[i])
+                accum[finished_batch, :] = 0
+
+            current_players = players[i]
+
+            # For all batch, update the accumulator.
+            accum[b_arr, current_players] = (
+                DISCOUNT_FACTOR * accum[b_arr, current_players]
+                + actual_rewards_for_steps[i]
+            )
+
+            actual_rewards_for_steps[i] = accum[b_arr, current_players]
+
+
+        return actual_rewards_for_steps
 
     def step(self):
         states, players = self.engine.state()
