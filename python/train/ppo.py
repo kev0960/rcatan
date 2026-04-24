@@ -7,6 +7,7 @@ import torch
 SEED = 42
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DISCOUNT_FACTOR = 0.99
+EPSILON = 0.1
 
 """
   actor  = FeedForwardNN(732, 284)   # outputs logits
@@ -15,12 +16,12 @@ DISCOUNT_FACTOR = 0.99
 
   for iteration in range(NUM_ITERS):
       # ---- 1. Rollout: collect T steps of on-policy data ----
-      buf_states, buf_players, buf_actions = [], [], []
-      buf_logp, buf_values, buf_rewards    = [], [], []
+      buf_states, buf_players, buf_actions, buf_masks = [], [], [], []
+      buf_logp, buf_values, buf_rewards               = [], [], []
 
       for t in range(T):
           states, players = engine.state()              # (B,732), (B,)
-          mask   = engine.get_action_mask()             # (B,284)
+          mask   = engine.get_action_mask()             # (B,284) bool
 
           logits = actor(states)
           logits[~mask] = -inf                          # mask invalid actions
@@ -31,8 +32,13 @@ DISCOUNT_FACTOR = 0.99
 
           reward = engine.step(action)                  # (B,4) per-player
 
+          # Detach logp/value: at update time they are rollout-time
+          # *constants* (logp is the denominator of the ratio; value is
+          # used only to form the detached advantage). Storing them with
+          # grad history would keep the rollout graph alive across T steps.
           buf_states.append(states);   buf_players.append(players)
-          buf_actions.append(action);  buf_logp.append(logp.detach())
+          buf_actions.append(action);  buf_masks.append(mask)
+          buf_logp.append(logp.detach())
           buf_values.append(value.detach()); buf_rewards.append(reward)
 
       # ---- 2. Compute per-action returns & advantages ----
@@ -41,21 +47,50 @@ DISCOUNT_FACTOR = 0.99
       advantages = returns - stack(buf_values)
       advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-      # ---- 3. ONE gradient step over the whole buffer ----
-      logits = actor(stack(buf_states).flatten(0,1))
-      logits[~flat_mask] = -inf
-      dist_new = Categorical(logits=logits)
-      logp_new = dist_new.log_prob(flat_actions)
+      # Flatten (T,B,*) -> (T*B,*) for the update. All tensors must be
+      # flattened the same way so indices line up across states/masks/
+      # actions/logp/returns/adv.
+      flat_states   = stack(buf_states).flatten(0,1)    # (N, 732)   N = T*B
+      flat_mask     = stack(buf_masks).flatten(0,1)     # (N, 284)
+      flat_actions  = stack(buf_actions).flatten(0,1)   # (N,)
+      flat_logp_old = stack(buf_logp).flatten(0,1)      # (N,)
+      flat_returns  = returns.flatten(0,1)              # (N,)
+      flat_adv      = advantages.flatten(0,1)           # (N,)
 
-      ratio = exp(logp_new - flat_logp_old)             # ~1.0 on first step
-      unclipped = ratio * flat_adv
-      clipped   = clip(ratio, 1-eps, 1+eps) * flat_adv
-      actor_loss  = -min(unclipped, clipped).mean()
-      critic_loss = ((critic(flat_states).squeeze(-1) - flat_returns)**2).mean()
-      entropy     = dist_new.entropy().mean()
+      # ---- 3. K epochs of minibatch updates over the SAME buffer ----
+      # This is what makes PPO "proximal". On epoch=0 minibatch=0 the
+      # weights still match the behavior policy, so ratio == 1 exactly
+      # and the clip is inactive — a single step here is just vanilla
+      # policy gradient. The clip only starts doing work on subsequent
+      # minibatches, once the policy has drifted from π_θ_old. Without
+      # this loop, we'd throw away the rollout after one update; the
+      # ratio/clip machinery would be dead weight.
+      N = flat_states.shape[0]
+      for epoch in range(K):                            # e.g. K = 4..10
+          perm = randperm(N)
+          for start in range(0, N, M):                  # M = minibatch size
+              idx = perm[start:start+M]
+              mb_states   = flat_states[idx]
+              mb_mask     = flat_mask[idx]
+              mb_actions  = flat_actions[idx]
+              mb_logp_old = flat_logp_old[idx]
+              mb_returns  = flat_returns[idx]
+              mb_adv      = flat_adv[idx]
 
-      loss = actor_loss + 0.5*critic_loss - 0.01*entropy
-      optimizer.zero_grad(); loss.backward(); optimizer.step()
+              logits = actor(mb_states)
+              logits[~mb_mask] = -inf                   # same mask as rollout
+              dist_new = Categorical(logits=logits)
+              logp_new = dist_new.log_prob(mb_actions)  # π_θ(a_t | s_t)
+
+              ratio = exp(logp_new - mb_logp_old)       # ==1 only on epoch=0,mb=0
+              unclipped = ratio * mb_adv
+              clipped   = clip(ratio, 1-eps, 1+eps) * mb_adv
+              actor_loss  = -min(unclipped, clipped).mean()
+              critic_loss = ((critic(mb_states).squeeze(-1) - mb_returns)**2).mean()
+              entropy     = dist_new.entropy().mean()
+
+              loss = actor_loss + 0.5*critic_loss - 0.01*entropy
+              optimizer.zero_grad(); loss.backward(); optimizer.step()
 """
 
 
@@ -65,6 +100,9 @@ class PPO:
         self.critic = FeedForwardNN(input_size=732, output_size=1).to(DEVICE)
         self.engine = Engine(batch_size=batch_size, seed=SEED)
 
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=1e-4)
+
         self.buf_states = []
         self.buf_players = []
         self.buf_actions = []
@@ -72,20 +110,91 @@ class PPO:
         self.buf_values = []
         self.buf_rewards = []
         self.buf_game_ended_mask = []
+        self.buf_masks = []
 
     def observe(self, steps: int):
         for step in range(steps):
-            states, players, actions, log_probs, value, rewards, game_ended_mask = (
-                self.step()
-            )
+            (
+                states,
+                players,
+                actions,
+                log_probs,
+                value,
+                rewards,
+                game_ended_mask,
+                masks,
+            ) = self.step()
 
             self.buf_states.append(states)
             self.buf_players.append(players)
             self.buf_actions.append(actions)
-            self.buf_log_probs.append(log_probs)
-            self.buf_values.append(value)
+            self.buf_log_probs.append(log_probs.detach())
+            self.buf_values.append(value.detach())
             self.buf_rewards.append(np.array(rewards))
             self.buf_game_ended_mask.append(game_ended_mask)
+            self.buf_masks.append(masks)
+
+    def train(self):
+        returns = torch.from_numpy(self.compute_discounted_rewards()).to(DEVICE)
+
+        # stack(values) is (T, B, 1)
+        values = torch.stack(self.buf_values).squeeze(-1).to(DEVICE)
+
+        advantages = returns - values
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        flat_states = torch.stack(self.buf_states).flatten(0, 1)
+        flat_mask = torch.stack(self.buf_masks).flatten(0, 1)
+        flat_actions = torch.stack(self.buf_actions).flatten(0, 1)
+        flat_log_probs_old = torch.stack(self.buf_log_probs).flatten(0, 1)
+
+        flat_returns = returns.flatten(0, 1)
+        flat_advantages = advantages.flatten(0, 1)
+
+        M = 128
+        N = flat_states.shape[0]
+
+        for epoch in range(10):
+            perm = torch.randperm(N)
+            for start in range(0, N, M):
+                idx = perm[start : start + M]
+                mb_states = flat_states[idx]
+                mb_mask = flat_mask[idx]
+                mb_actions = flat_actions[idx]
+                mb_log_probs_old = flat_log_probs_old[idx]
+                mb_returns = flat_returns[idx]
+                mb_advantages = flat_advantages[idx]
+
+                # Computing the pi_theta (a_t | s_t) on the updated actor
+                logits = self.actor(mb_states)
+                logits[~mb_mask] = -float("inf")
+                dist = Categorical(logits=logits)
+                logp_new = dist.log_prob(mb_actions)
+
+                # Compute pi_theta (a_t | s_t) / pi_theta_old (a_t | s_t)
+                ratio = torch.exp(logp_new - mb_log_probs_old)
+
+                unclipped = ratio * mb_advantages
+                clipped = torch.clamp(ratio, 1 - EPSILON, 1 + EPSILON) * mb_advantages
+
+                # Minimize the PPO-Clip objective.
+                actor_loss = -torch.min(unclipped, clipped).mean()
+
+                # Value function fitting.
+                critic_loss = (
+                    (self.critic(mb_states).squeeze(-1) - mb_returns) ** 2
+                ).mean()
+
+                entropy = dist.entropy().mean()
+
+                loss = actor_loss + 0.5 * critic_loss - 0.01 * entropy
+                self.actor_optimizer.zero_grad()
+                self.critic_optimizer.zero_grad()
+
+                loss.backward()
+
+                self.actor_optimizer.step()
+                self.critic_optimizer.step()
 
     # Denote the state as s_(player)_(turn) where player is 0-3.
     # Denote the action as a_(player)_(turn) where player is 0-3.
@@ -215,7 +324,6 @@ class PPO:
             # rewards.
             if end_mask.any():
                 batch_index, player_index = np.where(end_mask)
-                print(batch_index, player_index)
 
                 result[prev_action_index[batch_index, player_index], batch_index] = (
                     accum[batch_index, player_index]
@@ -267,16 +375,15 @@ class PPO:
 
             actual_rewards_for_steps[i] = accum[b_arr, current_players]
 
-
         return actual_rewards_for_steps
 
     def step(self):
         states, players = self.engine.state()
 
         # (batch_size, 284) bool
-        masks = np.array(self.engine.get_action_mask())
+        masks = torch.tensor(self.engine.get_action_mask()).bool().to(DEVICE)
 
-        state_tensor = torch.tensor(np.array(states)).float().to(DEVICE)
+        state_tensor = torch.tensor(states).float().to(DEVICE)
         logits = self.actor.forward(state_tensor)
 
         # Set invalid actions to -inf.
@@ -291,4 +398,13 @@ class PPO:
 
         rewards, game_ended_mask = self.engine.step(actions.cpu().numpy())
 
-        return states, players, actions, log_probs, value, rewards, game_ended_mask
+        return (
+            state_tensor,
+            players,
+            actions,
+            log_probs,
+            value,
+            rewards,
+            game_ended_mask,
+            masks,
+        )

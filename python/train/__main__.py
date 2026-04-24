@@ -10,6 +10,7 @@ NUM_STEPS = 1000
 def main():
     ppo = PPO(batch_size=BATCH_SIZE)
     ppo.observe(NUM_STEPS)
+    ppo.train()
 
     print("done")
 
