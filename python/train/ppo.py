@@ -2,96 +2,13 @@ import numpy as np
 from catan_engine import Engine
 from train.network import FeedForwardNN
 from torch.distributions import Categorical
+from tqdm import tqdm
 import torch
 
 SEED = 42
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DISCOUNT_FACTOR = 0.99
-EPSILON = 0.1
-
-"""
-  actor  = FeedForwardNN(732, 284)   # outputs logits
-  critic = FeedForwardNN(732, 1)     # outputs V(s)
-  engine = Engine(batch_size=B, seed=...)
-
-  for iteration in range(NUM_ITERS):
-      # ---- 1. Rollout: collect T steps of on-policy data ----
-      buf_states, buf_players, buf_actions, buf_masks = [], [], [], []
-      buf_logp, buf_values, buf_rewards               = [], [], []
-
-      for t in range(T):
-          states, players = engine.state()              # (B,732), (B,)
-          mask   = engine.get_action_mask()             # (B,284) bool
-
-          logits = actor(states)
-          logits[~mask] = -inf                          # mask invalid actions
-          dist   = Categorical(logits=logits)
-          action = dist.sample()                        # (B,)
-          logp   = dist.log_prob(action)                # (B,)
-          value  = critic(states).squeeze(-1)           # (B,)
-
-          reward = engine.step(action)                  # (B,4) per-player
-
-          # Detach logp/value: at update time they are rollout-time
-          # *constants* (logp is the denominator of the ratio; value is
-          # used only to form the detached advantage). Storing them with
-          # grad history would keep the rollout graph alive across T steps.
-          buf_states.append(states);   buf_players.append(players)
-          buf_actions.append(action);  buf_masks.append(mask)
-          buf_logp.append(logp.detach())
-          buf_values.append(value.detach()); buf_rewards.append(reward)
-
-      # ---- 2. Compute per-action returns & advantages ----
-      # (T,B) reward attributed to each action via the logic we built
-      returns    = PPO.compute_rewards(stack(buf_players), stack(buf_rewards))
-      advantages = returns - stack(buf_values)
-      advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-      # Flatten (T,B,*) -> (T*B,*) for the update. All tensors must be
-      # flattened the same way so indices line up across states/masks/
-      # actions/logp/returns/adv.
-      flat_states   = stack(buf_states).flatten(0,1)    # (N, 732)   N = T*B
-      flat_mask     = stack(buf_masks).flatten(0,1)     # (N, 284)
-      flat_actions  = stack(buf_actions).flatten(0,1)   # (N,)
-      flat_logp_old = stack(buf_logp).flatten(0,1)      # (N,)
-      flat_returns  = returns.flatten(0,1)              # (N,)
-      flat_adv      = advantages.flatten(0,1)           # (N,)
-
-      # ---- 3. K epochs of minibatch updates over the SAME buffer ----
-      # This is what makes PPO "proximal". On epoch=0 minibatch=0 the
-      # weights still match the behavior policy, so ratio == 1 exactly
-      # and the clip is inactive — a single step here is just vanilla
-      # policy gradient. The clip only starts doing work on subsequent
-      # minibatches, once the policy has drifted from π_θ_old. Without
-      # this loop, we'd throw away the rollout after one update; the
-      # ratio/clip machinery would be dead weight.
-      N = flat_states.shape[0]
-      for epoch in range(K):                            # e.g. K = 4..10
-          perm = randperm(N)
-          for start in range(0, N, M):                  # M = minibatch size
-              idx = perm[start:start+M]
-              mb_states   = flat_states[idx]
-              mb_mask     = flat_mask[idx]
-              mb_actions  = flat_actions[idx]
-              mb_logp_old = flat_logp_old[idx]
-              mb_returns  = flat_returns[idx]
-              mb_adv      = flat_adv[idx]
-
-              logits = actor(mb_states)
-              logits[~mb_mask] = -inf                   # same mask as rollout
-              dist_new = Categorical(logits=logits)
-              logp_new = dist_new.log_prob(mb_actions)  # π_θ(a_t | s_t)
-
-              ratio = exp(logp_new - mb_logp_old)       # ==1 only on epoch=0,mb=0
-              unclipped = ratio * mb_adv
-              clipped   = clip(ratio, 1-eps, 1+eps) * mb_adv
-              actor_loss  = -min(unclipped, clipped).mean()
-              critic_loss = ((critic(mb_states).squeeze(-1) - mb_returns)**2).mean()
-              entropy     = dist_new.entropy().mean()
-
-              loss = actor_loss + 0.5*critic_loss - 0.01*entropy
-              optimizer.zero_grad(); loss.backward(); optimizer.step()
-"""
+EPSILON = 0.2
 
 
 class PPO:
@@ -113,7 +30,7 @@ class PPO:
         self.buf_masks = []
 
     def observe(self, steps: int):
-        for step in range(steps):
+        for step in tqdm(range(steps), desc="observe", leave=False):
             (
                 states,
                 players,
@@ -134,7 +51,7 @@ class PPO:
             self.buf_game_ended_mask.append(game_ended_mask)
             self.buf_masks.append(masks)
 
-    def train(self):
+    def train(self, mini_batch_size: int):
         returns = torch.from_numpy(self.compute_discounted_rewards()).to(DEVICE)
 
         # stack(values) is (T, B, 1)
@@ -151,13 +68,18 @@ class PPO:
         flat_returns = returns.flatten(0, 1)
         flat_advantages = advantages.flatten(0, 1)
 
-        M = 128
         N = flat_states.shape[0]
 
-        for epoch in range(10):
+        sum_actor_loss = 0.0
+        sum_critic_loss = 0.0
+        sum_entropy = 0.0
+        sum_loss = 0.0
+        n_updates = 0
+
+        for _ in tqdm(range(10), desc="train", leave=False):
             perm = torch.randperm(N)
-            for start in range(0, N, M):
-                idx = perm[start : start + M]
+            for start in range(0, N, mini_batch_size):
+                idx = perm[start : start + mini_batch_size]
                 mb_states = flat_states[idx]
                 mb_mask = flat_mask[idx]
                 mb_actions = flat_actions[idx]
@@ -195,6 +117,32 @@ class PPO:
 
                 self.actor_optimizer.step()
                 self.critic_optimizer.step()
+
+                sum_actor_loss += actor_loss.item()
+                sum_critic_loss += critic_loss.item()
+                sum_entropy += entropy.item()
+                sum_loss += loss.item()
+                n_updates += 1
+
+        self.buf_states.clear()
+        self.buf_players.clear()
+        self.buf_actions.clear()
+        self.buf_log_probs.clear()
+        self.buf_values.clear()
+        self.buf_rewards.clear()
+        self.buf_game_ended_mask.clear()
+        self.buf_masks.clear()
+
+        return {
+            "loss": sum_loss / n_updates,
+            "actor_loss": sum_actor_loss / n_updates,
+            "critic_loss": sum_critic_loss / n_updates,
+            "entropy": sum_entropy / n_updates,
+            "return_mean": flat_returns.mean().item(),
+            "return_std": flat_returns.std().item(),
+            "value_mean": values.mean().item(),
+            "value_std": values.std().item(),
+        }
 
     # Denote the state as s_(player)_(turn) where player is 0-3.
     # Denote the action as a_(player)_(turn) where player is 0-3.
@@ -376,6 +324,69 @@ class PPO:
             actual_rewards_for_steps[i] = accum[b_arr, current_players]
 
         return actual_rewards_for_steps
+
+    def validate(self, num_matches: int = 100) -> dict[str, float]:
+        """Play `num_matches` games with the trained actor at a randomized seat
+        and random agents at the other seats. Returns the trained agent's win
+        rate and the average number of engine steps per finished game."""
+        engine = Engine(batch_size=num_matches, seed=SEED + 10_000)
+        rng = np.random.default_rng(SEED + 10_001)
+        trained_seats = rng.integers(0, 4, size=num_matches, dtype=np.int64)
+
+        wins = 0
+        finished = 0
+        total_steps = 0
+        steps_since_start = np.zeros(num_matches, dtype=np.int64)
+
+        self.actor.eval()
+        try:
+            with torch.no_grad():
+                while finished < num_matches:
+                    states, players = engine.state()
+                    masks_np = np.asarray(engine.get_action_mask(), dtype=bool)
+                    players_np = np.asarray(players)
+
+                    actions = np.zeros(num_matches, dtype=np.int64)
+
+                    trained_idx = np.where(players_np == trained_seats)[0]
+                    if trained_idx.size > 0:
+                        state_tensor = (
+                            torch.tensor(np.asarray(states)[trained_idx])
+                            .float()
+                            .to(DEVICE)
+                        )
+                        logits = self.actor(state_tensor)
+                        mask_tensor = (
+                            torch.tensor(masks_np[trained_idx]).bool().to(DEVICE)
+                        )
+                        logits[~mask_tensor] = -float("inf")
+                        actions[trained_idx] = (
+                            torch.argmax(logits, dim=-1).cpu().numpy()
+                        )
+
+                    for i in np.where(players_np != trained_seats)[0]:
+                        valid = np.flatnonzero(masks_np[i])
+                        actions[i] = rng.choice(valid)
+
+                    rewards, game_ended_mask = engine.step(actions.tolist())
+                    steps_since_start += 1
+
+                    for i, ended in enumerate(game_ended_mask):
+                        if not ended:
+                            continue
+                        if finished < num_matches:
+                            if rewards[i][trained_seats[i]] > 0:
+                                wins += 1
+                            total_steps += int(steps_since_start[i])
+                            finished += 1
+                        steps_since_start[i] = 0
+        finally:
+            self.actor.train()
+
+        return {
+            "win_rate": wins / finished if finished > 0 else 0.0,
+            "avg_steps": total_steps / finished if finished > 0 else 0.0,
+        }
 
     def step(self):
         states, players = self.engine.state()
