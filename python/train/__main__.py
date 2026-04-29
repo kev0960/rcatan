@@ -5,7 +5,7 @@ from train.ppo import PPO
 
 BATCH_SIZE = 32
 SEED = 42
-NUM_STEPS = 1000
+NUM_STEPS = 3000
 NUM_ITERATIONS = 300
 MINI_BATCH_SIZE = 1024
 VALIDATE_EVERY = 10
@@ -13,6 +13,8 @@ VALIDATE_MATCHES = 200
 LOG_DIR = Path("logs")
 TRAIN_LOG = LOG_DIR / "train.csv"
 VALIDATION_LOG = LOG_DIR / "validation.csv"
+CHECKPOINT_DIR = Path("checkpoints")
+LATEST_CHECKPOINT = CHECKPOINT_DIR / "actor_latest.pt"
 
 
 def _open_csv(path: Path, header: list[str]):
@@ -88,9 +90,13 @@ def main():
                 )
                 val_file.flush()
 
+                ppo.save_actor(CHECKPOINT_DIR / f"actor_iter_{i + 1}.pt")
+                ppo.save_actor(LATEST_CHECKPOINT)
+
     finally:
         train_file.close()
         val_file.close()
+        ppo.save_actor(LATEST_CHECKPOINT)
 
 
 if __name__ == "__main__":

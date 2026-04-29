@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 from catan_engine import Engine
 from train.network import FeedForwardNN
@@ -10,11 +12,27 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DISCOUNT_FACTOR = 0.99
 EPSILON = 0.2
 
+ACTOR_INPUT_SIZE = 732
+ACTOR_OUTPUT_SIZE = 284
+
+
+def load_actor(path: str | Path, device: str | torch.device = DEVICE) -> FeedForwardNN:
+    """Load a trained actor from `path` for inference (sets eval mode)."""
+    actor = FeedForwardNN(input_size=ACTOR_INPUT_SIZE, output_size=ACTOR_OUTPUT_SIZE)
+    actor.load_state_dict(torch.load(path, map_location=device))
+    actor.to(device)
+    actor.eval()
+    return actor
+
 
 class PPO:
     def __init__(self, batch_size: int):
-        self.actor = FeedForwardNN(input_size=732, output_size=284).to(DEVICE)
-        self.critic = FeedForwardNN(input_size=732, output_size=1).to(DEVICE)
+        self.actor = FeedForwardNN(
+            input_size=ACTOR_INPUT_SIZE, output_size=ACTOR_OUTPUT_SIZE
+        ).to(DEVICE)
+        self.critic = FeedForwardNN(input_size=ACTOR_INPUT_SIZE, output_size=1).to(
+            DEVICE
+        )
         self.engine = Engine(batch_size=batch_size, seed=SEED)
 
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
@@ -28,6 +46,11 @@ class PPO:
         self.buf_rewards = []
         self.buf_game_ended_mask = []
         self.buf_masks = []
+
+    def save_actor(self, path: str | Path) -> None:
+        """Persist the actor's weights to `path` (parent dirs created if needed)."""
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(self.actor.state_dict(), path)
 
     def observe(self, steps: int):
         for step in tqdm(range(steps), desc="observe", leave=False):
@@ -76,7 +99,7 @@ class PPO:
         sum_loss = 0.0
         n_updates = 0
 
-        for _ in tqdm(range(10), desc="train", leave=False):
+        for _ in tqdm(range(4), desc="train", leave=False):
             perm = torch.randperm(N)
             for start in range(0, N, mini_batch_size):
                 idx = perm[start : start + mini_batch_size]
@@ -340,7 +363,9 @@ class PPO:
 
         self.actor.eval()
         try:
-            with torch.no_grad():
+            with torch.no_grad(), tqdm(
+                total=num_matches, desc="validate", leave=False
+            ) as pbar:
                 while finished < num_matches:
                     states, players = engine.state()
                     masks_np = np.asarray(engine.get_action_mask(), dtype=bool)
@@ -379,6 +404,7 @@ class PPO:
                                 wins += 1
                             total_steps += int(steps_since_start[i])
                             finished += 1
+                            pbar.update(1)
                         steps_since_start[i] = 0
         finally:
             self.actor.train()

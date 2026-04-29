@@ -2,7 +2,14 @@
 name = "catanbot"
 version = "0.1.0"
 requires-python = ">=3.14"
-dependencies = ["torch>=2.9.1", "numpy", "catan-engine", "tqdm"]
+dependencies = [
+    "torch>=2.9.1",
+    "numpy",
+    "catan-engine",
+    "tqdm",
+    "starlette>=0.40",
+    "uvicorn[standard]>=0.30",
+]
 
 [[tool.uv.index]]
 name = "pytorch-cu130"
