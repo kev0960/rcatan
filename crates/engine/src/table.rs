@@ -4,9 +4,9 @@ use std::collections::HashSet;
 use arrayvec::ArrayVec;
 use once_cell::sync::Lazy;
 
-use crate::id::NodeId;
-use crate::id::RoadId;
-use crate::id::TileId;
+use crate::util::id::NodeId;
+use crate::util::id::RoadId;
+use crate::util::id::TileId;
 
 const fn nodes<const N: usize>(a: [u8; N]) -> [NodeId; N] {
     let mut result = [NodeId::new(0); N];

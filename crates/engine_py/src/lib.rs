@@ -1,5 +1,9 @@
 use pyo3::prelude::*;
-use rcatan::{Action, Building, Engine, PlayerId, Resource, State};
+use pyo3::types::PyDict;
+use rcatan::{
+    Action, Building, Engine, FullState, Phase, PlayerId, Resource, State,
+    TileType,
+};
 
 // Action space layout (284 total):
 //   [  0,  72)  BuildRoad(road_id)
@@ -191,6 +195,156 @@ impl PyEngine {
 
         (rewards, game_ended_mask)
     }
+
+    /// Rich snapshot of game `idx` as a Python dict, intended for rendering
+    /// (UI, REST responses). Shape:
+    ///   {
+    ///     "current_player": int,
+    ///     "phase": str,
+    ///     "phase_data": dict | None,
+    ///     "last_dice_roll": int | None,
+    ///     "winner": int | None,
+    ///     "longest_road": {"player": int, "length": int} | None,
+    ///     "tiles": list of {tile_id, resource, dice, has_robber},
+    ///     "roads": list of {road_id, player},
+    ///     "structures": list of {node_id, building, player},
+    ///     "players": list of {id, vp, cards: {brick, lumber, ore, grain, wool}},
+    ///   }
+    fn full_state<'py>(
+        &self,
+        py: Python<'py>,
+        idx: usize,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        full_state_to_dict(py, &self.inner.full_state(idx))
+    }
+}
+
+fn resource_name(r: Resource) -> &'static str {
+    match r {
+        Resource::Brick => "brick",
+        Resource::Lumber => "lumber",
+        Resource::Ore => "ore",
+        Resource::Grain => "grain",
+        Resource::Wool => "wool",
+    }
+}
+
+fn tile_resource_name(t: TileType) -> &'static str {
+    match t {
+        TileType::Hills => "brick",
+        TileType::Forest => "lumber",
+        TileType::Mountains => "ore",
+        TileType::Fields => "grain",
+        TileType::Pasture => "wool",
+        TileType::Desert => "desert",
+    }
+}
+
+fn full_state_to_dict<'py>(
+    py: Python<'py>,
+    fs: &FullState,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("current_player", u8::from(fs.current_player))?;
+    d.set_item("last_dice_roll", fs.last_dice_roll)?;
+    d.set_item("winner", fs.winner.map(u8::from))?;
+
+    let (phase_name, phase_data): (&str, Option<Bound<'py, PyDict>>) =
+        match fs.phase {
+            Phase::InitialSettlementPlacement => {
+                ("initial_settlement_placement", None)
+            }
+            Phase::InitialRoadPlacement => ("initial_road_placement", None),
+            Phase::Discard { target_counts } => {
+                let pd = PyDict::new(py);
+                pd.set_item("target_counts", target_counts.to_vec())?;
+                ("discard", Some(pd))
+            }
+            Phase::MoveRobber => ("move_robber", None),
+            Phase::StealResource => ("steal_resource", None),
+            Phase::ContinueAction => ("continue_action", None),
+            Phase::GameEnded => ("game_ended", None),
+        };
+    d.set_item("phase", phase_name)?;
+    d.set_item("phase_data", phase_data)?;
+
+    let longest_road = match fs.longest_road {
+        Some((p, len)) => {
+            let lr = PyDict::new(py);
+            lr.set_item("player", u8::from(p))?;
+            lr.set_item("length", len)?;
+            Some(lr)
+        }
+        None => None,
+    };
+    d.set_item("longest_road", longest_road)?;
+
+    // Tiles: walk dice_to_tiles (dice 2..=12) and emit each tile with its
+    // canonical tile_id. Desert tiles live at the dice==7 slot.
+    let mut tiles: Vec<Bound<'py, PyDict>> = Vec::with_capacity(19);
+    for (dice_offset, bucket) in fs.board.dice_to_tiles.iter().enumerate() {
+        let dice = (dice_offset as u8) + 2;
+        for tile in bucket {
+            let t = PyDict::new(py);
+            t.set_item("tile_id", u8::from(tile.tile_index))?;
+            t.set_item("resource", tile_resource_name(tile.tile_type))?;
+            t.set_item("dice", dice)?;
+            t.set_item("has_robber", tile.has_robber)?;
+            tiles.push(t);
+        }
+    }
+    tiles.sort_by_key(|t| {
+        t.get_item("tile_id")
+            .ok()
+            .and_then(|x| x.and_then(|v| v.extract::<u8>().ok()))
+            .unwrap_or(0)
+    });
+    d.set_item("tiles", tiles)?;
+
+    let mut roads: Vec<Bound<'py, PyDict>> = Vec::new();
+    for (i, road) in fs.board.roads.iter().enumerate() {
+        if let Some(p) = road.get() {
+            let r = PyDict::new(py);
+            r.set_item("road_id", i as u8)?;
+            r.set_item("player", u8::from(p))?;
+            roads.push(r);
+        }
+    }
+    d.set_item("roads", roads)?;
+
+    let mut structures: Vec<Bound<'py, PyDict>> = Vec::new();
+    for (i, s) in fs.board.structures.iter().enumerate() {
+        if let Some((building, p)) = s.get() {
+            let st = PyDict::new(py);
+            st.set_item("node_id", i as u8)?;
+            st.set_item(
+                "building",
+                match building {
+                    Building::Settlement => "settlement",
+                    Building::City => "city",
+                },
+            )?;
+            st.set_item("player", u8::from(p))?;
+            structures.push(st);
+        }
+    }
+    d.set_item("structures", structures)?;
+
+    let mut players: Vec<Bound<'py, PyDict>> = Vec::with_capacity(4);
+    for i in 0..4 {
+        let p = PyDict::new(py);
+        p.set_item("id", i as u8)?;
+        p.set_item("vp", fs.vps[i])?;
+        let cards = PyDict::new(py);
+        for r in Resource::ALL {
+            cards.set_item(resource_name(r), fs.player_cards[i][r as usize])?;
+        }
+        p.set_item("cards", cards)?;
+        players.push(p);
+    }
+    d.set_item("players", players)?;
+
+    Ok(d)
 }
 
 #[pymodule]

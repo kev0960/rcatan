@@ -1,7 +1,7 @@
-use crate::id::NodeId;
-use crate::id::PlayerId;
-use crate::id::RoadId;
-use crate::id::TileId;
+use crate::util::id::NodeId;
+use crate::util::id::PlayerId;
+use crate::util::id::RoadId;
+use crate::util::id::TileId;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Debug)]
 pub enum Building {

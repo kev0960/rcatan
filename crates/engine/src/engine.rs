@@ -1,4 +1,8 @@
-use crate::{Reward, action::Action, game::Game, state::State};
+use crate::Reward;
+use crate::action::Action;
+use crate::game::Game;
+use crate::state::FullState;
+use crate::state::State;
 
 pub struct Engine {
     games: Vec<Game>,
@@ -17,6 +21,10 @@ impl Engine {
 
     pub fn state(&self) -> Vec<State> {
         self.games.iter().map(|g| g.state()).collect()
+    }
+
+    pub fn full_state(&self, idx: usize) -> FullState {
+        self.games[idx].full_state()
     }
 
     pub fn get_actions(&mut self) -> Vec<Vec<Action>> {

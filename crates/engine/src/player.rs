@@ -1,19 +1,51 @@
 use arrayvec::ArrayVec;
+use once_cell::sync::Lazy;
 
-use crate::vecset::VecSet;
+use crate::util::vecset::VecSet;
 
 use crate::action::Action;
 use crate::action::Building;
 use crate::action::DevCard;
 use crate::action::Resource;
 use crate::board::Board;
-use crate::id::NodeId;
-use crate::id::PlayerId;
-use crate::id::RoadId;
 use crate::table::NODE_TO_CONTAINING_ROADS;
 use crate::table::NODE_TO_NEARBY_NODES;
 use crate::table::ROAD_TO_CONNECTED_ROADS;
 use crate::table::ROAD_TO_NODES;
+use crate::util::id::NodeId;
+use crate::util::id::PlayerId;
+use crate::util::id::RoadId;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Port {
+    Brick,
+    Lumber,
+    Ore,
+    Grain,
+    Wool,
+    ThreeToOne,
+}
+
+static NODE_TO_PORTS: Lazy<[Option<Port>; 54]> =
+    Lazy::new(build_node_to_ports_table);
+
+fn build_node_to_ports_table() -> [Option<Port>; 54] {
+    let mut node_to_ports: [Option<Port>; 54] = [None; 54];
+
+    for i in 0..54 {
+        node_to_ports[i] = match i {
+            0 | 3 | 1 | 5 | 47 | 51 | 26 | 32 => Some(Port::ThreeToOne),
+            11 | 16 => Some(Port::Brick),
+            33 | 38 => Some(Port::Lumber),
+            42 | 46 => Some(Port::Ore),
+            10 | 15 => Some(Port::Wool),
+            52 | 49 => Some(Port::Grain),
+            _ => None,
+        };
+    }
+
+    node_to_ports.try_into().unwrap()
+}
 
 pub struct Player {
     pub id: PlayerId,
@@ -43,6 +75,20 @@ impl Player {
             + self.cards[2]
             + self.cards[3]
             + self.cards[4]
+    }
+
+    pub fn get_debug_info(&self) -> String {
+        format!(
+            "brick={}, lumber={}, ore={}, grain={}, wool={}, roads={}, settlements={}, cities={}",
+            self.cards[Resource::Brick as usize],
+            self.cards[Resource::Lumber as usize],
+            self.cards[Resource::Ore as usize],
+            self.cards[Resource::Grain as usize],
+            self.cards[Resource::Wool as usize],
+            self.num_road,
+            self.num_settlement,
+            self.num_city,
+        )
     }
 
     pub fn add_resource_card(&mut self, resource: Resource, num_cards: u8) {
@@ -166,7 +212,7 @@ impl Player {
             .collect::<Vec<_>>()
     }
 
-    pub fn get_available_roads_for_inital_board_setup(
+    pub fn get_available_roads_for_initial_board_setup(
         &self,
         board: &Board,
     ) -> Vec<RoadId> {
@@ -259,6 +305,79 @@ impl Player {
                         .iter()
                         .map(|r| Action::MaritimeTrade((resource, 4), *r)),
                 )
+            }
+        }
+
+        // Check ports
+        let ports = board
+            .structures
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                if let Some((_, p)) = s.get()
+                    && p == self.id
+                {
+                    if let Some(port) = NODE_TO_PORTS[i] {
+                        return Some(port);
+                    }
+                }
+
+                None
+            })
+            .collect::<VecSet<_>>();
+
+        for port in ports {
+            match port {
+                Port::ThreeToOne => {
+                    for resource in Resource::ALL {
+                        if self.cards[resource as usize] >= 3 {
+                            actions.push(Action::MaritimeTrade(
+                                (resource, 3),
+                                resource,
+                            ));
+                        }
+                    }
+                }
+                Port::Brick => {
+                    if self.cards[Resource::Brick as usize] >= 2 {
+                        actions.push(Action::MaritimeTrade(
+                            (Resource::Brick, 2),
+                            Resource::Brick,
+                        ));
+                    }
+                }
+                Port::Lumber => {
+                    if self.cards[Resource::Lumber as usize] >= 2 {
+                        actions.push(Action::MaritimeTrade(
+                            (Resource::Lumber, 2),
+                            Resource::Lumber,
+                        ));
+                    }
+                }
+                Port::Ore => {
+                    if self.cards[Resource::Ore as usize] >= 2 {
+                        actions.push(Action::MaritimeTrade(
+                            (Resource::Ore, 2),
+                            Resource::Ore,
+                        ));
+                    }
+                }
+                Port::Grain => {
+                    if self.cards[Resource::Grain as usize] >= 2 {
+                        actions.push(Action::MaritimeTrade(
+                            (Resource::Grain, 2),
+                            Resource::Grain,
+                        ));
+                    }
+                }
+                Port::Wool => {
+                    if self.cards[Resource::Wool as usize] >= 2 {
+                        actions.push(Action::MaritimeTrade(
+                            (Resource::Wool, 2),
+                            Resource::Wool,
+                        ));
+                    }
+                }
             }
         }
 
@@ -478,7 +597,8 @@ mod tests {
     #[test]
     fn get_available_actions_city() {
         let mut board = Board::new(&[]);
-        board.build_structure(NodeId::new(0), p0(), Building::Settlement);
+        // Node 7 is not a port — keeps this test focused on city building.
+        board.build_structure(NodeId::new(7), p0(), Building::Settlement);
 
         let mut p = Player::new(p0());
         p.num_settlement = 1;
@@ -490,7 +610,7 @@ mod tests {
         assert_eq!(
             actions,
             [
-                Action::BuildStructure(Building::City, NodeId::new(0)),
+                Action::BuildStructure(Building::City, NodeId::new(7)),
                 Action::EndTurn,
             ]
         );
@@ -594,7 +714,7 @@ mod tests {
         board.build_structure(NodeId::new(0), p0(), Building::Settlement);
 
         let p = Player::new(p0());
-        let mut roads = p.get_available_roads_for_inital_board_setup(&board);
+        let mut roads = p.get_available_roads_for_initial_board_setup(&board);
         roads.sort();
 
         assert_eq!(roads, [RoadId::new(0), RoadId::new(1)]);
@@ -611,7 +731,7 @@ mod tests {
         board.build_road(RoadId::new(0), p0());
 
         let p = Player::new(p0());
-        let mut roads = p.get_available_roads_for_inital_board_setup(&board);
+        let mut roads = p.get_available_roads_for_initial_board_setup(&board);
         roads.sort();
 
         // Should only return roads around node 10, not node 0.
@@ -632,7 +752,7 @@ mod tests {
         board.build_structure(NodeId::new(10), p0(), Building::Settlement);
 
         let p = Player::new(p0());
-        let mut roads = p.get_available_roads_for_inital_board_setup(&board);
+        let mut roads = p.get_available_roads_for_initial_board_setup(&board);
         roads.sort();
 
         // Should only return roads around node 10 (player 0's settlement).
@@ -642,5 +762,146 @@ mod tests {
         expected_sorted.sort();
 
         assert_eq!(roads, expected_sorted);
+    }
+
+    // ---- port maritime trade tests ----
+
+    #[test]
+    fn get_available_actions_2_for_1_ports_grant_trades() {
+        // (node, port resource) — one node from each 2:1 port pair.
+        let cases = [
+            (11, Resource::Brick),
+            (33, Resource::Lumber),
+            (42, Resource::Ore),
+            (49, Resource::Grain),
+            (10, Resource::Wool),
+        ];
+
+        for (node, resource) in cases {
+            let mut board = Board::new(&[]);
+            board.build_structure(
+                NodeId::new(node),
+                p0(),
+                Building::Settlement,
+            );
+
+            let mut p = Player::new(p0());
+            p.add_resource_card(resource, 2);
+
+            let mut actions = p.get_available_actions(&board);
+            actions.sort();
+            assert_eq!(
+                actions,
+                [
+                    Action::MaritimeTrade((resource, 2), resource),
+                    Action::EndTurn,
+                ],
+                "port at node {} for {:?}",
+                node,
+                resource,
+            );
+        }
+    }
+
+    #[test]
+    fn get_available_actions_2_for_1_port_requires_2_resources() {
+        let mut board = Board::new(&[]);
+        // Brick port at node 11.
+        board.build_structure(NodeId::new(11), p0(), Building::Settlement);
+
+        let mut p = Player::new(p0());
+        p.add_resource_card(Resource::Brick, 1);
+
+        assert_eq!(p.get_available_actions(&board), [Action::EndTurn]);
+    }
+
+    #[test]
+    fn get_available_actions_3_to_1_port_grants_trades_for_any_resource() {
+        let mut board = Board::new(&[]);
+        // Node 0 has a ThreeToOne port.
+        board.build_structure(NodeId::new(0), p0(), Building::Settlement);
+
+        let mut p = Player::new(p0());
+        for r in Resource::ALL {
+            p.add_resource_card(r, 3);
+        }
+
+        let mut actions = p.get_available_actions(&board);
+        actions.sort();
+        assert_eq!(
+            actions,
+            [
+                Action::MaritimeTrade((Resource::Brick, 3), Resource::Brick),
+                Action::MaritimeTrade((Resource::Lumber, 3), Resource::Lumber),
+                Action::MaritimeTrade((Resource::Ore, 3), Resource::Ore),
+                Action::MaritimeTrade((Resource::Grain, 3), Resource::Grain),
+                Action::MaritimeTrade((Resource::Wool, 3), Resource::Wool),
+                Action::EndTurn,
+            ]
+        );
+    }
+
+    #[test]
+    fn get_available_actions_3_to_1_port_requires_3_resources() {
+        let mut board = Board::new(&[]);
+        board.build_structure(NodeId::new(0), p0(), Building::Settlement);
+
+        let mut p = Player::new(p0());
+        p.add_resource_card(Resource::Brick, 2);
+
+        assert_eq!(p.get_available_actions(&board), [Action::EndTurn]);
+    }
+
+    #[test]
+    fn get_available_actions_port_owned_by_other_player_no_benefit() {
+        let mut board = Board::new(&[]);
+        // Brick port at node 11, owned by p1.
+        board.build_structure(NodeId::new(11), p1(), Building::Settlement);
+
+        let mut p = Player::new(p0());
+        p.add_resource_card(Resource::Brick, 2);
+
+        assert_eq!(p.get_available_actions(&board), [Action::EndTurn]);
+    }
+
+    #[test]
+    fn get_available_actions_port_with_city_grants_trade() {
+        let mut board = Board::new(&[]);
+        // Brick port at node 11, with a city (not just a settlement).
+        board.build_structure(NodeId::new(11), p0(), Building::City);
+
+        let mut p = Player::new(p0());
+        p.add_resource_card(Resource::Brick, 2);
+
+        let mut actions = p.get_available_actions(&board);
+        actions.sort();
+        assert_eq!(
+            actions,
+            [
+                Action::MaritimeTrade((Resource::Brick, 2), Resource::Brick),
+                Action::EndTurn,
+            ]
+        );
+    }
+
+    #[test]
+    fn get_available_actions_duplicate_ports_dont_duplicate_trades() {
+        let mut board = Board::new(&[]);
+        // Both node 11 and node 16 are Brick ports.
+        board.build_structure(NodeId::new(11), p0(), Building::Settlement);
+        board.build_structure(NodeId::new(16), p0(), Building::Settlement);
+
+        let mut p = Player::new(p0());
+        p.add_resource_card(Resource::Brick, 2);
+
+        let mut actions = p.get_available_actions(&board);
+        actions.sort();
+        assert_eq!(
+            actions,
+            [
+                Action::MaritimeTrade((Resource::Brick, 2), Resource::Brick),
+                Action::EndTurn,
+            ]
+        );
     }
 }

@@ -4,12 +4,12 @@ use std::collections::VecDeque;
 use arrayvec::ArrayVec;
 
 use crate::board::Board;
-use crate::id::NodeId;
-use crate::id::PlayerId;
-use crate::id::RoadId;
 use crate::table::ROAD_TO_CONNECTED_ROADS;
 use crate::table::ROAD_TO_NODES;
 use crate::table::ROAD_TO_ROAD_CONNECTION;
+use crate::util::id::NodeId;
+use crate::util::id::PlayerId;
+use crate::util::id::RoadId;
 
 pub fn find_longest_road(board: &Board) -> ArrayVec<u8, 4> {
     let mut checked = HashSet::<RoadId>::new();

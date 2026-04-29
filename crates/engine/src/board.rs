@@ -6,12 +6,12 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::action::Building;
 use crate::action::Resource;
-use crate::id::NodeId;
-use crate::id::PlayerId;
-use crate::id::RoadId;
-use crate::id::TileId;
 use crate::table::NODE_TO_TILE;
 use crate::table::TILE_TO_NODE;
+use crate::util::id::NodeId;
+use crate::util::id::PlayerId;
+use crate::util::id::RoadId;
+use crate::util::id::TileId;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TileType {
@@ -24,10 +24,10 @@ pub enum TileType {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Tile {
-    tile_type: TileType,
-    has_robber: bool,
-    tile_index: TileId,
+pub struct Tile {
+    pub tile_type: TileType,
+    pub has_robber: bool,
+    pub tile_index: TileId,
 }
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -111,7 +111,7 @@ pub struct Board {
 
     // Dice number to the tiles.
     // 2 to 12.
-    dice_to_tiles: ArrayVec<ArrayVec<Tile, 2>, 11>,
+    pub dice_to_tiles: ArrayVec<ArrayVec<Tile, 2>, 11>,
 
     tiles: ArrayVec<TileType, 19>,
 }

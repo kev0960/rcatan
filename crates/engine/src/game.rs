@@ -1,20 +1,23 @@
 use arrayvec::ArrayVec;
 use std::array::from_fn;
 
+use crate::game_viewer::render_board;
 use crate::reward::Reward;
 use crate::reward::VictoryPoint;
+use crate::state::FullState;
+use crate::state::Phase;
 use crate::state::State;
-use crate::vecset::VecSet;
+use crate::util::vecset::VecSet;
 
 use crate::action::Action;
 use crate::action::Building;
 use crate::action::Resource;
 use crate::board::Board;
-use crate::id::PlayerId;
 use crate::player::Player;
 use crate::road::find_longest_road;
-use crate::sample::choose_weighted;
 use crate::table::TILE_TO_NODE;
+use crate::util::id::PlayerId;
+use crate::util::sample::choose_weighted;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 
@@ -25,6 +28,7 @@ struct GameDetail {
     // 4 bits for each player's victory points
     vp: VictoryPoint,
     // largest_army: u8,
+    total_turns: u16,
 }
 
 impl GameDetail {
@@ -32,6 +36,7 @@ impl GameDetail {
         Self {
             longest_road: 0,
             vp: VictoryPoint::new(ArrayVec::from([0; 4])),
+            total_turns: 0,
             // largest_army: 0,
         }
     }
@@ -99,6 +104,9 @@ pub struct Game {
 
     state: GameState,
 
+    // Most recent dice roll for the current turn. Reset to None on EndTurn.
+    last_dice_roll: Option<u8>,
+
     rng: ChaCha8Rng,
 }
 
@@ -112,6 +120,7 @@ impl Game {
             dev_cards: ArrayVec::from([0; 5]),
             game_detail: GameDetail::new(),
             state: GameState::InitialBoardSetup(0),
+            last_dice_roll: None,
             rng,
         }
     }
@@ -139,6 +148,59 @@ impl Game {
         }
     }
 
+    pub fn full_state(&self) -> FullState {
+        let mut player_cards = [[0u8; 5]; 4];
+        let mut vps = [0u8; 4];
+        for (i, p) in self.players.iter().enumerate() {
+            for j in 0..5 {
+                player_cards[i][j] = p.cards[j];
+            }
+            vps[i] = self.game_detail.vp.get_vp(p.id);
+        }
+
+        // Map the engine's internal GameState to the externally-facing Phase.
+        // RollDice is invisible to consumers — get_actions resolves it before
+        // returning, so a caller will only ever observe one of the phases below.
+        let phase = match self.state {
+            GameState::InitialBoardSetup(step) => {
+                if step % 2 == 0 {
+                    Phase::InitialSettlementPlacement
+                } else {
+                    Phase::InitialRoadPlacement
+                }
+            }
+            GameState::Dice7Rolled((_, target_counts)) => {
+                let still_discarding = (0..4).any(|i| {
+                    self.players[i].num_resource_cards() > target_counts[i]
+                });
+                if still_discarding {
+                    Phase::Discard { target_counts }
+                } else {
+                    Phase::MoveRobber
+                }
+            }
+            GameState::StealResourceAfterRobber => Phase::StealResource,
+            GameState::ContinueAction => Phase::ContinueAction,
+            GameState::GameEnded(_) => Phase::GameEnded,
+            // RollDice is transient: get_actions immediately rolls and
+            // transitions to ContinueAction or Dice7Rolled. If a consumer ever
+            // sees it (e.g. before any get_actions call) report it as
+            // ContinueAction's logical successor.
+            GameState::RollDice => Phase::ContinueAction,
+        };
+
+        FullState {
+            current_player: self.current_player_id(),
+            board: self.board.clone(),
+            longest_road: self.game_detail.get_longest_road(),
+            player_cards,
+            vps,
+            last_dice_roll: self.last_dice_roll,
+            phase,
+            winner: self.is_game_ended(),
+        }
+    }
+
     // Return the list of actions that the agent can do in the given game state.
     //
     // WARNING: This function is NOT idempotent!
@@ -150,6 +212,8 @@ impl Game {
         if let GameState::RollDice = self.state {
             let dice =
                 self.rng.random_range(1..=6) + self.rng.random_range(1..=6);
+
+            self.last_dice_roll = Some(dice);
 
             if dice == 7 {
                 let mut target_resource_num = [0; 4];
@@ -250,7 +314,9 @@ impl Game {
                 } else {
                     // Build the road.
                     current_player
-                        .get_available_roads_for_inital_board_setup(&self.board)
+                        .get_available_roads_for_initial_board_setup(
+                            &self.board,
+                        )
                         .into_iter()
                         .map(Action::BuildRoad)
                         .collect()
@@ -364,10 +430,32 @@ impl Game {
             Action::EndTurn => {
                 self.current_player = (self.current_player + 1) % 4;
                 self.state = GameState::RollDice;
+                self.last_dice_roll = None;
+                self.game_detail.total_turns += 1;
             }
         }
 
         self.compute_rewards(should_recompute_vp)
+    }
+
+    pub fn get_game_state_for_debug(&self) -> String {
+        let mut debug_info = String::new();
+        debug_info.push_str(&format!(
+            "Total turns: {}\n",
+            self.game_detail.total_turns
+        ));
+
+        for player in &self.players {
+            debug_info.push_str(&format!(
+                "Player {}: {}\n",
+                usize::from(player.id),
+                player.get_debug_info()
+            ));
+        }
+
+        debug_info.push_str(&render_board(&self.board));
+
+        debug_info
     }
 
     // Run "one step". Returns the player id when the game is ended. Otherwise returns None.
@@ -507,7 +595,9 @@ impl Game {
 mod tests {
     use super::*;
     use crate::board::TileType;
-    use crate::id::{NodeId, RoadId, TileId};
+    use crate::util::id::NodeId;
+    use crate::util::id::RoadId;
+    use crate::util::id::TileId;
 
     fn p(id: usize) -> PlayerId {
         PlayerId::new(id as u8)
@@ -523,6 +613,7 @@ mod tests {
             dev_cards: ArrayVec::from([0; 5]),
             game_detail: GameDetail::new(),
             state: GameState::RollDice,
+            last_dice_roll: None,
             rng,
         }
     }
@@ -712,6 +803,7 @@ mod tests {
             dev_cards: ArrayVec::from([0; 5]),
             game_detail: GameDetail::new(),
             state: GameState::RollDice,
+            last_dice_roll: None,
             rng,
         };
 
@@ -734,6 +826,7 @@ mod tests {
             dev_cards: ArrayVec::from([0; 5]),
             game_detail: GameDetail::new(),
             state: GameState::RollDice,
+            last_dice_roll: None,
             rng,
         };
 
@@ -810,6 +903,7 @@ mod tests {
             dev_cards: ArrayVec::from([0; 5]),
             game_detail: GameDetail::new(),
             state: GameState::Dice7Rolled((p(0), [0, 4, 5, 0])), // Player 0 rolled a 7
+            last_dice_roll: Some(7),
             rng,
         };
 
