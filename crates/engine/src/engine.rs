@@ -27,14 +27,19 @@ impl Engine {
         self.games[idx].full_state()
     }
 
+    pub fn vps(&self) -> Vec<[u8; 4]> {
+        self.games.iter().map(|g| g.vps()).collect()
+    }
+
     pub fn get_actions(&mut self) -> Vec<Vec<Action>> {
         self.games.iter_mut().map(|g| g.get_actions()).collect()
     }
 
+    // Returns reward and VPs (only when the corresponding game has ended)
     pub fn run_actions(
         &mut self,
         actions: Vec<Action>,
-    ) -> (Vec<Reward>, Vec<bool>) {
+    ) -> (Vec<Reward>, Vec<Option<[u8; 4]>>) {
         let rewards = actions
             .into_iter()
             .enumerate()
@@ -45,11 +50,12 @@ impl Engine {
 
         for i in 0..self.games.len() {
             if self.games[i].is_game_ended().is_some() {
+                let vps = self.games[i].vps();
                 self.games[i] = Game::new(self.next_seed);
                 self.next_seed += 1;
-                game_ended_mask.push(true);
+                game_ended_mask.push(Some(vps));
             } else {
-                game_ended_mask.push(false);
+                game_ended_mask.push(None);
             }
         }
 

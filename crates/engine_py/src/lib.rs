@@ -183,7 +183,7 @@ impl PyEngine {
     fn step(
         &mut self,
         actions: Vec<usize>,
-    ) -> (Vec<(f32, f32, f32, f32)>, Vec<bool>) {
+    ) -> (Vec<(f32, f32, f32, f32)>, Vec<Option<(u8, u8, u8, u8)>>) {
         let actions: Vec<Action> =
             actions.into_iter().map(index_to_action).collect();
         let (rewards, game_ended_mask) = self.inner.run_actions(actions);
@@ -193,7 +193,22 @@ impl PyEngine {
             .map(|r| (r.reward[0], r.reward[1], r.reward[2], r.reward[3]))
             .collect();
 
+        let game_ended_mask = game_ended_mask
+            .into_iter()
+            .map(|v| v.map(|v| (v[0], v[1], v[2], v[3])))
+            .collect();
+
         (rewards, game_ended_mask)
+    }
+
+    /// Returns each game's victory points as a list of (vp0, vp1, vp2, vp3)
+    /// tuples (one tuple per batch element).
+    fn vps(&self) -> Vec<(u8, u8, u8, u8)> {
+        self.inner
+            .vps()
+            .into_iter()
+            .map(|v| (v[0], v[1], v[2], v[3]))
+            .collect()
     }
 
     /// Rich snapshot of game `idx` as a Python dict, intended for rendering

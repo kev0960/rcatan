@@ -132,6 +132,14 @@ impl Game {
         }
     }
 
+    pub fn vps(&self) -> [u8; 4] {
+        let mut vps = [0u8; 4];
+        for p in &self.players {
+            vps[u8::from(p.id) as usize] = self.game_detail.vp.get_vp(p.id);
+        }
+        vps
+    }
+
     pub fn state(&self) -> State {
         let mut player_cards = [[0u8; 5]; 4];
         for (i, p) in self.players.iter().enumerate() {

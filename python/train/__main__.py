@@ -9,7 +9,7 @@ NUM_STEPS = 3000
 NUM_ITERATIONS = 300
 MINI_BATCH_SIZE = 1024
 VALIDATE_EVERY = 10
-VALIDATE_MATCHES = 200
+VALIDATE_MATCHES = 100
 LOG_DIR = Path("logs")
 TRAIN_LOG = LOG_DIR / "train.csv"
 VALIDATION_LOG = LOG_DIR / "validation.csv"
@@ -42,7 +42,22 @@ def main():
         ],
     )
     val_file, val_writer = _open_csv(
-        VALIDATION_LOG, ["iter", "win_rate", "avg_steps"]
+        VALIDATION_LOG,
+        [
+            "iter",
+            "win_rate_vs_random",
+            "avg_steps_vs_random",
+            "avg_vp_vs_random",
+            "win_rate_vs_50",
+            "avg_steps_vs_50",
+            "avg_vp_vs_50",
+            "win_rate_vs_75",
+            "avg_steps_vs_75",
+            "avg_vp_vs_75",
+            "win_rate_vs_90",
+            "avg_steps_vs_90",
+            "avg_vp_vs_90",
+        ],
     )
 
     try:
@@ -74,18 +89,39 @@ def main():
             train_file.flush()
 
             if (i + 1) % VALIDATE_EVERY == 0:
-                val_metrics = ppo.validate(num_matches=VALIDATE_MATCHES)
+                val_metrics = ppo.validate(
+                    current_iter=i + 1,
+                    num_matches=VALIDATE_MATCHES,
+                    checkpoint_dir=CHECKPOINT_DIR,
+                    checkpoint_step=VALIDATE_EVERY,
+                )
                 tqdm.write(
-                    f"[iter {i + 1}] win rate vs 3 random: "
-                    f"{val_metrics['win_rate']:.2%} "
-                    f"avg steps: {val_metrics['avg_steps']:.1f} "
-                    f"({VALIDATE_MATCHES} matches)"
+                    f"[iter {i + 1}] "
+                    f"vs random: win {val_metrics['win_rate_vs_random']:.2%} "
+                    f"vp {val_metrics['avg_vp_vs_random']:.2f} | "
+                    f"vs 50%: win {val_metrics['win_rate_vs_50']:.2%} "
+                    f"vp {val_metrics['avg_vp_vs_50']:.2f} | "
+                    f"vs 75%: win {val_metrics['win_rate_vs_75']:.2%} "
+                    f"vp {val_metrics['avg_vp_vs_75']:.2f} | "
+                    f"vs 90%: win {val_metrics['win_rate_vs_90']:.2%} "
+                    f"vp {val_metrics['avg_vp_vs_90']:.2f} "
+                    f"({VALIDATE_MATCHES} matches each)"
                 )
                 val_writer.writerow(
                     [
                         i + 1,
-                        f"{val_metrics['win_rate']:.6f}",
-                        f"{val_metrics['avg_steps']:.2f}",
+                        f"{val_metrics['win_rate_vs_random']:.6f}",
+                        f"{val_metrics['avg_steps_vs_random']:.2f}",
+                        f"{val_metrics['avg_vp_vs_random']:.4f}",
+                        f"{val_metrics['win_rate_vs_50']:.6f}",
+                        f"{val_metrics['avg_steps_vs_50']:.2f}",
+                        f"{val_metrics['avg_vp_vs_50']:.4f}",
+                        f"{val_metrics['win_rate_vs_75']:.6f}",
+                        f"{val_metrics['avg_steps_vs_75']:.2f}",
+                        f"{val_metrics['avg_vp_vs_75']:.4f}",
+                        f"{val_metrics['win_rate_vs_90']:.6f}",
+                        f"{val_metrics['avg_steps_vs_90']:.2f}",
+                        f"{val_metrics['avg_vp_vs_90']:.4f}",
                     ]
                 )
                 val_file.flush()

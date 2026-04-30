@@ -348,10 +348,15 @@ class PPO:
 
         return actual_rewards_for_steps
 
-    def validate(self, num_matches: int = 100) -> dict[str, float]:
-        """Play `num_matches` games with the trained actor at a randomized seat
-        and random agents at the other seats. Returns the trained agent's win
-        rate and the average number of engine steps per finished game."""
+    def _play_eval(
+        self,
+        num_matches: int,
+        opponent_actor: FeedForwardNN | None,
+        desc: str,
+    ) -> dict[str, float]:
+        """Play `num_matches` games with the trained actor at a randomized
+        seat. Other seats are filled by `opponent_actor` (argmax) if provided,
+        otherwise by a uniform-random agent over valid actions."""
         engine = Engine(batch_size=num_matches, seed=SEED + 10_000)
         rng = np.random.default_rng(SEED + 10_001)
         trained_seats = rng.integers(0, 4, size=num_matches, dtype=np.int64)
@@ -359,15 +364,26 @@ class PPO:
         wins = 0
         finished = 0
         total_steps = 0
+        total_vp = 0
         steps_since_start = np.zeros(num_matches, dtype=np.int64)
 
+        def argmax_actions(actor, states_np, masks_np, idx):
+            state_tensor = torch.tensor(states_np[idx]).float().to(DEVICE)
+            logits = actor(state_tensor)
+            mask_tensor = torch.tensor(masks_np[idx]).bool().to(DEVICE)
+            logits[~mask_tensor] = -float("inf")
+            return torch.argmax(logits, dim=-1).cpu().numpy()
+
         self.actor.eval()
+        if opponent_actor is not None:
+            opponent_actor.eval()
         try:
             with torch.no_grad(), tqdm(
-                total=num_matches, desc="validate", leave=False
+                total=num_matches, desc=desc, leave=False
             ) as pbar:
                 while finished < num_matches:
                     states, players = engine.state()
+                    states_np = np.asarray(states)
                     masks_np = np.asarray(engine.get_action_mask(), dtype=bool)
                     players_np = np.asarray(players)
 
@@ -375,33 +391,32 @@ class PPO:
 
                     trained_idx = np.where(players_np == trained_seats)[0]
                     if trained_idx.size > 0:
-                        state_tensor = (
-                            torch.tensor(np.asarray(states)[trained_idx])
-                            .float()
-                            .to(DEVICE)
-                        )
-                        logits = self.actor(state_tensor)
-                        mask_tensor = (
-                            torch.tensor(masks_np[trained_idx]).bool().to(DEVICE)
-                        )
-                        logits[~mask_tensor] = -float("inf")
-                        actions[trained_idx] = (
-                            torch.argmax(logits, dim=-1).cpu().numpy()
+                        actions[trained_idx] = argmax_actions(
+                            self.actor, states_np, masks_np, trained_idx
                         )
 
-                    for i in np.where(players_np != trained_seats)[0]:
-                        valid = np.flatnonzero(masks_np[i])
-                        actions[i] = rng.choice(valid)
+                    opp_idx = np.where(players_np != trained_seats)[0]
+                    if opp_idx.size > 0:
+                        if opponent_actor is None:
+                            for i in opp_idx:
+                                valid = np.flatnonzero(masks_np[i])
+                                actions[i] = rng.choice(valid)
+                        else:
+                            actions[opp_idx] = argmax_actions(
+                                opponent_actor, states_np, masks_np, opp_idx
+                            )
 
                     rewards, game_ended_mask = engine.step(actions.tolist())
                     steps_since_start += 1
 
-                    for i, ended in enumerate(game_ended_mask):
-                        if not ended:
+                    for i, vps_if_ended in enumerate(game_ended_mask):
+                        if vps_if_ended is None:
                             continue
                         if finished < num_matches:
-                            if rewards[i][trained_seats[i]] > 0:
+                            seat = int(trained_seats[i])
+                            if rewards[i][seat] > 0:
                                 wins += 1
+                                total_vp += vps_if_ended[seat]
                             total_steps += int(steps_since_start[i])
                             finished += 1
                             pbar.update(1)
@@ -412,7 +427,63 @@ class PPO:
         return {
             "win_rate": wins / finished if finished > 0 else 0.0,
             "avg_steps": total_steps / finished if finished > 0 else 0.0,
+            "avg_vp": total_vp / finished if finished > 0 else 0.0,
         }
+
+    def validate(
+        self,
+        current_iter: int,
+        num_matches: int = 100,
+        checkpoint_dir: str | Path = "checkpoints",
+        checkpoint_step: int = 10,
+    ) -> dict[str, float]:
+        """Validate the trained actor against a random agent and past
+        checkpoints at 90%, 75%, and 50% of `current_iter` (each floored to a
+        multiple of `checkpoint_step`). Plays `num_matches` per opponent.
+
+        Results are cached by target iter so duplicates aren't re-run: a
+        percentage that floors to 0 reuses the random result, and percentages
+        that floor to the same checkpoint share a single eval. Win rate /
+        avg steps are NaN if a positive target's checkpoint is missing."""
+        checkpoint_dir = Path(checkpoint_dir)
+        out: dict[str, float] = {}
+
+        random_metrics = self._play_eval(
+            num_matches, opponent_actor=None, desc="validate vs random"
+        )
+        out["win_rate_vs_random"] = random_metrics["win_rate"]
+        out["avg_steps_vs_random"] = random_metrics["avg_steps"]
+        out["avg_vp_vs_random"] = random_metrics["avg_vp"]
+
+        # 0 sentinel = random agent.
+        cache: dict[int, dict[str, float]] = {0: random_metrics}
+
+        for pct, label in [(0.9, "90"), (0.75, "75"), (0.5, "50")]:
+            target_iter = int(pct * current_iter)
+            target_iter = (target_iter // checkpoint_step) * checkpoint_step
+
+            if target_iter not in cache:
+                ckpt_path = checkpoint_dir / f"actor_iter_{target_iter}.pt"
+                if not ckpt_path.exists():
+                    cache[target_iter] = {
+                        "win_rate": float("nan"),
+                        "avg_steps": float("nan"),
+                        "avg_vp": float("nan"),
+                    }
+                else:
+                    opponent = load_actor(ckpt_path, DEVICE)
+                    cache[target_iter] = self._play_eval(
+                        num_matches,
+                        opponent_actor=opponent,
+                        desc=f"validate vs {label}% (iter {target_iter})",
+                    )
+
+            metrics = cache[target_iter]
+            out[f"win_rate_vs_{label}"] = metrics["win_rate"]
+            out[f"avg_steps_vs_{label}"] = metrics["avg_steps"]
+            out[f"avg_vp_vs_{label}"] = metrics["avg_vp"]
+
+        return out
 
     def step(self):
         states, players = self.engine.state()
@@ -433,7 +504,9 @@ class PPO:
 
         value = self.critic.forward(state_tensor)
 
-        rewards, game_ended_mask = self.engine.step(actions.cpu().numpy())
+        rewards, vps_if_ended = self.engine.step(actions.cpu().numpy())
+
+        game_ended_mask = [vps is not None for vps in vps_if_ended]
 
         return (
             state_tensor,
