@@ -39,7 +39,7 @@ pub enum DevCard {
     Monopoly = 9,
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Copy, Clone)]
 pub enum Action {
     BuildRoad(RoadId),                // 72
     BuildStructure(Building, NodeId), // 54 * 2

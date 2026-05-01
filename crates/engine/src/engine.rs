@@ -70,6 +70,31 @@ mod tests {
     use rand_chacha::ChaCha8Rng;
 
     #[test]
+    fn run_one_game_until_end() {
+        let mut engine = Engine::new(32, /*seed=*/ 615);
+        let mut rng = ChaCha8Rng::seed_from_u64(615);
+
+        for _ in 0..10000 {
+            let actions_per_game = engine.get_actions();
+            let chosen: Vec<Action> = actions_per_game
+                .into_iter()
+                .map(|actions| {
+                    let idx = rng.random_range(0..actions.len());
+                    actions.into_iter().nth(idx).unwrap()
+                })
+                .collect();
+            let (_, game_ended_mask) = engine.run_actions(chosen);
+            let game_ended = game_ended_mask.iter().find(|v| v.is_some());
+
+            if let Some(game_ended) = game_ended {
+                assert!(game_ended.unwrap().iter().any(|v| *v >= 10));
+                break;
+            }
+        }
+
+    }
+
+    #[test]
     fn run_32_games_1000_steps() {
         let mut engine = Engine::new(32, /*seed=*/ 42);
         let mut rng = ChaCha8Rng::seed_from_u64(615);

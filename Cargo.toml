@@ -1,3 +1,6 @@
 [workspace]
 members = ["crates/engine", "crates/engine_py"]
 resolver = "2"
+
+[profile.release]
+debug = "line-tables-only"

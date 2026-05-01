@@ -48,15 +48,19 @@ def main():
             "win_rate_vs_random",
             "avg_steps_vs_random",
             "avg_vp_vs_random",
+            "avg_opp_vp_vs_random",
             "win_rate_vs_50",
             "avg_steps_vs_50",
             "avg_vp_vs_50",
+            "avg_opp_vp_vs_50",
             "win_rate_vs_75",
             "avg_steps_vs_75",
             "avg_vp_vs_75",
+            "avg_opp_vp_vs_75",
             "win_rate_vs_90",
             "avg_steps_vs_90",
             "avg_vp_vs_90",
+            "avg_opp_vp_vs_90",
         ],
     )
 
@@ -98,13 +102,13 @@ def main():
                 tqdm.write(
                     f"[iter {i + 1}] "
                     f"vs random: win {val_metrics['win_rate_vs_random']:.2%} "
-                    f"vp {val_metrics['avg_vp_vs_random']:.2f} | "
+                    f"vp {val_metrics['avg_vp_vs_random']:.2f}/{val_metrics['avg_opp_vp_vs_random']:.2f} | "
                     f"vs 50%: win {val_metrics['win_rate_vs_50']:.2%} "
-                    f"vp {val_metrics['avg_vp_vs_50']:.2f} | "
+                    f"vp {val_metrics['avg_vp_vs_50']:.2f}/{val_metrics['avg_opp_vp_vs_50']:.2f} | "
                     f"vs 75%: win {val_metrics['win_rate_vs_75']:.2%} "
-                    f"vp {val_metrics['avg_vp_vs_75']:.2f} | "
+                    f"vp {val_metrics['avg_vp_vs_75']:.2f}/{val_metrics['avg_opp_vp_vs_75']:.2f} | "
                     f"vs 90%: win {val_metrics['win_rate_vs_90']:.2%} "
-                    f"vp {val_metrics['avg_vp_vs_90']:.2f} "
+                    f"vp {val_metrics['avg_vp_vs_90']:.2f}/{val_metrics['avg_opp_vp_vs_90']:.2f} "
                     f"({VALIDATE_MATCHES} matches each)"
                 )
                 val_writer.writerow(
@@ -113,15 +117,19 @@ def main():
                         f"{val_metrics['win_rate_vs_random']:.6f}",
                         f"{val_metrics['avg_steps_vs_random']:.2f}",
                         f"{val_metrics['avg_vp_vs_random']:.4f}",
+                        f"{val_metrics['avg_opp_vp_vs_random']:.4f}",
                         f"{val_metrics['win_rate_vs_50']:.6f}",
                         f"{val_metrics['avg_steps_vs_50']:.2f}",
                         f"{val_metrics['avg_vp_vs_50']:.4f}",
+                        f"{val_metrics['avg_opp_vp_vs_50']:.4f}",
                         f"{val_metrics['win_rate_vs_75']:.6f}",
                         f"{val_metrics['avg_steps_vs_75']:.2f}",
                         f"{val_metrics['avg_vp_vs_75']:.4f}",
+                        f"{val_metrics['avg_opp_vp_vs_75']:.4f}",
                         f"{val_metrics['win_rate_vs_90']:.6f}",
                         f"{val_metrics['avg_steps_vs_90']:.2f}",
                         f"{val_metrics['avg_vp_vs_90']:.4f}",
+                        f"{val_metrics['avg_opp_vp_vs_90']:.4f}",
                     ]
                 )
                 val_file.flush()

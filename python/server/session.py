@@ -69,7 +69,7 @@ class GameSession:
         while not self.finished and self._current_player() != self.human_seat:
             state, mask = self._state_and_mask()
             action_index = self.bot.pick_argmax(state, mask)
-            _, ended = self.engine.step([action_index])
+            _, ended, _ = self.engine.step([action_index])
             decoded = decode_action(action_index)
             self.last_ai_actions.append(
                 {
@@ -106,7 +106,7 @@ class GameSession:
         _, mask = self._state_and_mask()
         if not mask[action_index]:
             raise ValueError(f"action {action_index} is not legal in current state")
-        _, ended = self.engine.step([action_index])
+        _, ended, _ = self.engine.step([action_index])
         if ended[0]:
             self._finalize()
             return

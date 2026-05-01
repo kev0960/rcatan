@@ -8,5 +8,6 @@ name = "catan_engine"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = "0.28.2"
+pyo3 = {version = "0.28.2", features= ["extension-module"]}
 rcatan = { path = "../engine" }
+numpy = "0.28.0"

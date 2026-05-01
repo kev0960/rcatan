@@ -1,3 +1,5 @@
+use numpy::ndarray::Array2;
+use numpy::{IntoPyArray, PyArray1, PyArray2};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rcatan::{
@@ -136,6 +138,7 @@ fn state_to_vec(state: State) -> Vec<f32> {
 #[pyclass(name = "Engine")]
 struct PyEngine {
     inner: Engine,
+    batch_size: usize,
 }
 
 #[pymethods]
@@ -143,6 +146,7 @@ impl PyEngine {
     #[new]
     fn new(batch_size: usize, seed: u64) -> Self {
         Self {
+            batch_size,
             inner: Engine::new(batch_size, seed),
         }
     }
@@ -150,22 +154,44 @@ impl PyEngine {
     #[classattr]
     const NUM_ACTIONS: usize = NUM_ACTIONS;
 
-    fn state(&self) -> (Vec<Vec<f32>>, Vec<u32>) {
-        let current_players = self
+    fn state<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray1<u32>>)> {
+        let current_players: Vec<u32> = self
             .inner
             .state()
             .iter()
             .map(|s| u8::from(s.current_player) as u32)
             .collect();
 
-        let states = self.inner.state().into_iter().map(state_to_vec).collect();
+        let states: Vec<f32> = self
+            .inner
+            .state()
+            .into_iter()
+            .map(state_to_vec)
+            .flatten()
+            .collect();
 
-        (states, current_players)
+        let states_array =
+            Array2::from_shape_vec((self.batch_size, STATE_VEC_LEN), states)
+                .map_err(|err| {
+                    pyo3::exceptions::PyValueError::new_err(err.to_string())
+                })?;
+
+        Ok((
+            states_array.into_pyarray(py),
+            current_players.into_pyarray(py),
+        ))
     }
 
     /// Returns a boolean action mask per game: list[list[bool]] of shape (batch_size, 284).
-    fn get_action_mask(&mut self) -> Vec<Vec<bool>> {
-        self.inner
+    fn get_action_mask<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyArray2<bool>>> {
+        let masks: Vec<bool> = self
+            .inner
             .get_actions()
             .into_iter()
             .map(|actions| {
@@ -175,40 +201,74 @@ impl PyEngine {
                 }
                 mask
             })
-            .collect()
+            .flatten()
+            .collect();
+
+        let masks_array =
+            Array2::from_shape_vec((self.batch_size, NUM_ACTIONS), masks)
+                .map_err(|err| {
+                    pyo3::exceptions::PyValueError::new_err(err.to_string())
+                })?;
+
+        Ok(masks_array.into_pyarray(py))
     }
 
     /// Advance each game by one action. Takes a list of action indices (one per game).
-    /// Returns rewards: list[tuple[f32, f32, f32, f32]] of shape (batch_size, 4).
-    fn step(
+    /// Returns:
+    ///   rewards:      ndarray (batch_size, 4) f32
+    ///   ended_mask:   ndarray (batch_size,)   bool — True if the game ended this step
+    ///   final_vps:    ndarray (batch_size, 4) u8  — final VPs for ended games, 0 elsewhere
+    fn step<'py>(
         &mut self,
+        py: Python<'py>,
         actions: Vec<usize>,
-    ) -> (Vec<(f32, f32, f32, f32)>, Vec<Option<(u8, u8, u8, u8)>>) {
+    ) -> PyResult<(
+        Bound<'py, PyArray2<f32>>,
+        Bound<'py, PyArray1<bool>>,
+        Bound<'py, PyArray2<u8>>,
+    )> {
         let actions: Vec<Action> =
             actions.into_iter().map(index_to_action).collect();
         let (rewards, game_ended_mask) = self.inner.run_actions(actions);
 
-        let rewards = rewards
-            .into_iter()
-            .map(|r| (r.reward[0], r.reward[1], r.reward[2], r.reward[3]))
-            .collect();
+        let rewards_flat: Vec<f32> =
+            rewards.into_iter().flat_map(|r| r.reward).collect();
+        let rewards_arr =
+            Array2::from_shape_vec((self.batch_size, 4), rewards_flat)
+                .map_err(|err| {
+                    pyo3::exceptions::PyValueError::new_err(err.to_string())
+                })?;
 
-        let game_ended_mask = game_ended_mask
-            .into_iter()
-            .map(|v| v.map(|v| (v[0], v[1], v[2], v[3])))
-            .collect();
+        let ended: Vec<bool> =
+            game_ended_mask.iter().map(|v| v.is_some()).collect();
 
-        (rewards, game_ended_mask)
+        let mut vps_flat: Vec<u8> = Vec::with_capacity(self.batch_size * 4);
+        for v in &game_ended_mask {
+            match v {
+                Some(arr) => vps_flat.extend_from_slice(arr),
+                None => vps_flat.extend_from_slice(&[0u8; 4]),
+            }
+        }
+        let vps_arr = Array2::from_shape_vec((self.batch_size, 4), vps_flat)
+            .map_err(|err| {
+                pyo3::exceptions::PyValueError::new_err(err.to_string())
+            })?;
+
+        Ok((
+            rewards_arr.into_pyarray(py),
+            ended.into_pyarray(py),
+            vps_arr.into_pyarray(py),
+        ))
     }
 
-    /// Returns each game's victory points as a list of (vp0, vp1, vp2, vp3)
-    /// tuples (one tuple per batch element).
-    fn vps(&self) -> Vec<(u8, u8, u8, u8)> {
-        self.inner
-            .vps()
-            .into_iter()
-            .map(|v| (v[0], v[1], v[2], v[3]))
-            .collect()
+    /// Returns each game's victory points as ndarray (batch_size, 4) u8.
+    fn vps<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<u8>>> {
+        let flat: Vec<u8> = self.inner.vps().into_iter().flatten().collect();
+        Array2::from_shape_vec((self.batch_size, 4), flat)
+            .map(|a| a.into_pyarray(py))
+            .map_err(|err| {
+                pyo3::exceptions::PyValueError::new_err(err.to_string())
+            })
     }
 
     /// Rich snapshot of game `idx` as a Python dict, intended for rendering
