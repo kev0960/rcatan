@@ -331,51 +331,57 @@ impl Player {
                 Port::ThreeToOne => {
                     for resource in Resource::ALL {
                         if self.cards[resource as usize] >= 3 {
-                            actions.push(Action::MaritimeTrade(
-                                (resource, 3),
+                            generate_maritime_trade_actions(
+                                &mut actions,
                                 resource,
-                            ));
+                                3,
+                            );
                         }
                     }
                 }
                 Port::Brick => {
                     if self.cards[Resource::Brick as usize] >= 2 {
-                        actions.push(Action::MaritimeTrade(
-                            (Resource::Brick, 2),
+                        generate_maritime_trade_actions(
+                            &mut actions,
                             Resource::Brick,
-                        ));
+                            2,
+                        );
                     }
                 }
                 Port::Lumber => {
                     if self.cards[Resource::Lumber as usize] >= 2 {
-                        actions.push(Action::MaritimeTrade(
-                            (Resource::Lumber, 2),
+                        generate_maritime_trade_actions(
+                            &mut actions,
                             Resource::Lumber,
-                        ));
+                            2,
+                        );
                     }
                 }
                 Port::Ore => {
                     if self.cards[Resource::Ore as usize] >= 2 {
-                        actions.push(Action::MaritimeTrade(
-                            (Resource::Ore, 2),
+                        generate_maritime_trade_actions(
+                            &mut actions,
                             Resource::Ore,
-                        ));
+                            2,
+                        );
                     }
                 }
                 Port::Grain => {
                     if self.cards[Resource::Grain as usize] >= 2 {
-                        actions.push(Action::MaritimeTrade(
-                            (Resource::Grain, 2),
+                        generate_maritime_trade_actions(
+                            &mut actions,
                             Resource::Grain,
-                        ));
+                            2,
+                        );
                     }
                 }
                 Port::Wool => {
                     if self.cards[Resource::Wool as usize] >= 2 {
-                        actions.push(Action::MaritimeTrade(
-                            (Resource::Wool, 2),
+                        generate_maritime_trade_actions(
+                            &mut actions,
                             Resource::Wool,
-                        ));
+                            2,
+                        );
                     }
                 }
             }
@@ -389,6 +395,16 @@ impl Player {
             self.cards[i + 5] += self.dev_card_bought[i];
             self.dev_card_bought[i] = 0;
         }
+    }
+}
+
+fn generate_maritime_trade_actions(
+    actions: &mut Vec<Action>,
+    source_resource: Resource,
+    amount: u8,
+) {
+    for r in Resource::ALL {
+        actions.push(Action::MaritimeTrade((source_resource, amount), r));
     }
 }
 
@@ -793,7 +809,11 @@ mod tests {
             assert_eq!(
                 actions,
                 [
-                    Action::MaritimeTrade((resource, 2), resource),
+                    Action::MaritimeTrade((resource, 2), Resource::Brick),
+                    Action::MaritimeTrade((resource, 2), Resource::Lumber),
+                    Action::MaritimeTrade((resource, 2), Resource::Ore),
+                    Action::MaritimeTrade((resource, 2), Resource::Grain),
+                    Action::MaritimeTrade((resource, 2), Resource::Wool),
                     Action::EndTurn,
                 ],
                 "port at node {} for {:?}",
@@ -828,17 +848,14 @@ mod tests {
 
         let mut actions = p.get_available_actions(&board);
         actions.sort();
-        assert_eq!(
-            actions,
-            [
-                Action::MaritimeTrade((Resource::Brick, 3), Resource::Brick),
-                Action::MaritimeTrade((Resource::Lumber, 3), Resource::Lumber),
-                Action::MaritimeTrade((Resource::Ore, 3), Resource::Ore),
-                Action::MaritimeTrade((Resource::Grain, 3), Resource::Grain),
-                Action::MaritimeTrade((Resource::Wool, 3), Resource::Wool),
-                Action::EndTurn,
-            ]
-        );
+        let mut expected: Vec<Action> = Vec::new();
+        for src in Resource::ALL {
+            for want in Resource::ALL {
+                expected.push(Action::MaritimeTrade((src, 3), want));
+            }
+        }
+        expected.push(Action::EndTurn);
+        assert_eq!(actions, expected);
     }
 
     #[test]
@@ -879,6 +896,10 @@ mod tests {
             actions,
             [
                 Action::MaritimeTrade((Resource::Brick, 2), Resource::Brick),
+                Action::MaritimeTrade((Resource::Brick, 2), Resource::Lumber),
+                Action::MaritimeTrade((Resource::Brick, 2), Resource::Ore),
+                Action::MaritimeTrade((Resource::Brick, 2), Resource::Grain),
+                Action::MaritimeTrade((Resource::Brick, 2), Resource::Wool),
                 Action::EndTurn,
             ]
         );
@@ -900,6 +921,10 @@ mod tests {
             actions,
             [
                 Action::MaritimeTrade((Resource::Brick, 2), Resource::Brick),
+                Action::MaritimeTrade((Resource::Brick, 2), Resource::Lumber),
+                Action::MaritimeTrade((Resource::Brick, 2), Resource::Ore),
+                Action::MaritimeTrade((Resource::Brick, 2), Resource::Grain),
+                Action::MaritimeTrade((Resource::Brick, 2), Resource::Wool),
                 Action::EndTurn,
             ]
         );

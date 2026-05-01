@@ -66,19 +66,30 @@ class GameSession:
         """Run AI turns until it is the human's turn (or the game ends).
         Records each AI action in `last_ai_actions` for the next client view."""
         self.last_ai_actions = []
-        while not self.finished and self._current_player() != self.human_seat:
-            state, mask = self._state_and_mask()
-            action_index = self.bot.pick_argmax(state, mask)
-            _, ended, _ = self.engine.step([action_index])
-            decoded = decode_action(action_index)
-            self.last_ai_actions.append(
-                {
-                    "seat": self._current_player_after_step(),
-                    "action": decoded,
-                }
-            )
-            if ended[0]:
-                self._finalize()
+        while not self.finished:
+            if self._current_player() != self.human_seat:
+                state, mask = self._state_and_mask()
+                action_index = self.bot.pick_argmax(state, mask)
+                _, ended, _ = self.engine.step([action_index])
+                decoded = decode_action(action_index)
+                self.last_ai_actions.append(
+                    {
+                        "seat": self._current_player_after_step(),
+                        "action": decoded,
+                    }
+                )
+                if ended[0]:
+                    self._finalize()
+                    return
+                continue
+            # Human's turn. The engine may be parked on the transient RollDice
+            # state — get_action_mask() rolls the dice and distributes resources
+            # as a side effect. Flush it here so view()'s full_state snapshot
+            # reflects the post-roll player cards. If the roll was a 7 and a
+            # bot now has to discard, current_player flips to that bot and the
+            # outer loop runs the bot's discards before returning.
+            self.engine.get_action_mask()
+            if self._current_player() == self.human_seat:
                 return
 
     def _current_player_after_step(self) -> int:
