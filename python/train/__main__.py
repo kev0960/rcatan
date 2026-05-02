@@ -3,13 +3,14 @@ from pathlib import Path
 from tqdm import tqdm
 from train.ppo import PPO
 
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 SEED = 42
 NUM_STEPS = 3000
 NUM_ITERATIONS = 300
 MINI_BATCH_SIZE = 1024
 VALIDATE_EVERY = 10
-VALIDATE_MATCHES = 100
+VALIDATE_MATCHES_RANDOM = 100
+VALIDATE_MATCHES_CHECKPOINT = 200
 LOG_DIR = Path("logs")
 TRAIN_LOG = LOG_DIR / "train.csv"
 VALIDATION_LOG = LOG_DIR / "validation.csv"
@@ -95,7 +96,8 @@ def main():
             if (i + 1) % VALIDATE_EVERY == 0:
                 val_metrics = ppo.validate(
                     current_iter=i + 1,
-                    num_matches=VALIDATE_MATCHES,
+                    num_matches_random=VALIDATE_MATCHES_RANDOM,
+                    num_matches_checkpoint=VALIDATE_MATCHES_CHECKPOINT,
                     checkpoint_dir=CHECKPOINT_DIR,
                     checkpoint_step=VALIDATE_EVERY,
                 )
@@ -109,7 +111,7 @@ def main():
                     f"vp {val_metrics['avg_vp_vs_75']:.2f}/{val_metrics['avg_opp_vp_vs_75']:.2f} | "
                     f"vs 90%: win {val_metrics['win_rate_vs_90']:.2%} "
                     f"vp {val_metrics['avg_vp_vs_90']:.2f}/{val_metrics['avg_opp_vp_vs_90']:.2f} "
-                    f"({VALIDATE_MATCHES} matches each)"
+                    f"(random: {VALIDATE_MATCHES_RANDOM}, ckpt: {VALIDATE_MATCHES_CHECKPOINT} matches)"
                 )
                 val_writer.writerow(
                     [

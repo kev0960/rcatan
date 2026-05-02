@@ -49,12 +49,16 @@ fn build_node_to_ports_table() -> [Option<Port>; 54] {
 
 pub struct Player {
     pub id: PlayerId,
-    dev_card_bought: ArrayVec<u8, 5>,
+
+    // Dev cards that are bought at the given turn.
+    pub dev_card_bought: ArrayVec<u8, 5>,
+    used_dev_card_current_turn: bool,
 
     pub cards: ArrayVec<u8, 10>,
     pub num_road: u8,
     pub num_settlement: u8,
     pub num_city: u8,
+    pub num_used_knight_cards: u8,
 }
 
 impl Player {
@@ -62,10 +66,12 @@ impl Player {
         Self {
             cards: ArrayVec::from([0; 10]),
             dev_card_bought: ArrayVec::from([0; 5]),
+            used_dev_card_current_turn: false,
             id,
             num_road: 0,
             num_settlement: 0,
             num_city: 0,
+            num_used_knight_cards: 0,
         }
     }
 
@@ -101,6 +107,15 @@ impl Player {
 
     pub fn add_dev_card(&mut self, dev_card: DevCard) {
         self.dev_card_bought[dev_card as usize - 5] += 1;
+    }
+
+    pub fn use_dev_card(&mut self, dev_card: DevCard) {
+        self.cards[dev_card as usize] -= 1;
+        self.used_dev_card_current_turn = true;
+
+        if dev_card == DevCard::Knight {
+            self.num_used_knight_cards += 1;
+        }
     }
 
     // Find all roads where the player can build a new road.
@@ -249,7 +264,11 @@ impl Player {
             .collect()
     }
 
-    pub fn get_available_actions(&self, board: &Board) -> Vec<Action> {
+    pub fn get_available_actions(
+        &self,
+        board: &Board,
+        dev_cards: &[u8],
+    ) -> Vec<Action> {
         let mut actions = vec![Action::EndTurn];
 
         // Check road building.
@@ -288,14 +307,38 @@ impl Player {
             )
         }
 
-        /*
         if self.cards[Resource::Ore as usize] != 0
             && self.cards[Resource::Grain as usize] != 0
             && self.cards[Resource::Wool as usize] != 0
+            // There should be at least one dev card available to buy.
+            && dev_cards.iter().sum::<u8>() > 0
         {
             actions.push(Action::BuyDevCard);
         }
-        */
+
+        // Check usable dev cards. Do not count VP as it is not playable.
+        if !self.used_dev_card_current_turn {
+            for (i, card) in self.cards[5..10].iter().enumerate() {
+                if i == DevCard::VictoryPoint as usize - 5 {
+                    continue;
+                }
+
+                if *card == 0 {
+                    continue;
+                }
+
+                let dev_card = DevCard::from_array_index(i);
+                // Road Building is only useful if the player can build a road.
+                if dev_card == DevCard::RoadBuilding
+                    && (self.get_available_roads(board).is_empty()
+                        || self.num_road >= 15)
+                {
+                    continue;
+                }
+
+                actions.push(Action::UseDevCard(dev_card));
+            }
+        }
 
         for i in 0..5 {
             if self.cards[i] >= 4 {
@@ -395,6 +438,8 @@ impl Player {
             self.cards[i + 5] += self.dev_card_bought[i];
             self.dev_card_bought[i] = 0;
         }
+
+        self.used_dev_card_current_turn = false;
     }
 }
 
@@ -454,6 +499,32 @@ mod tests {
         p.end_player_turn();
         assert_eq!(p.cards[DevCard::Knight as usize], 1);
         assert_eq!(p.dev_card_bought[0], 0);
+    }
+
+    #[test]
+    fn use_knight_increments_num_used_knight_cards() {
+        let mut p = Player::new(p0());
+        p.cards[DevCard::Knight as usize] = 2;
+
+        p.use_dev_card(DevCard::Knight);
+        assert_eq!(p.num_used_knight_cards, 1);
+
+        p.use_dev_card(DevCard::Knight);
+        assert_eq!(p.num_used_knight_cards, 2);
+    }
+
+    #[test]
+    fn use_non_knight_dev_card_does_not_change_knight_count() {
+        let mut p = Player::new(p0());
+        p.cards[DevCard::Monopoly as usize] = 1;
+        p.cards[DevCard::YearOfPlenty as usize] = 1;
+        p.cards[DevCard::RoadBuilding as usize] = 1;
+
+        p.use_dev_card(DevCard::Monopoly);
+        p.use_dev_card(DevCard::YearOfPlenty);
+        p.use_dev_card(DevCard::RoadBuilding);
+
+        assert_eq!(p.num_used_knight_cards, 0);
     }
 
     // Road 0 connects nodes [0, 3]. Connected roads are 1 and 6.
@@ -550,7 +621,10 @@ mod tests {
     fn get_available_actions_no_resources_only_end_turn() {
         let board = Board::new(&[]);
         let p = Player::new(p0());
-        assert_eq!(p.get_available_actions(&board), [Action::EndTurn]);
+        assert_eq!(
+            p.get_available_actions(&board, &[0u8; 5]),
+            [Action::EndTurn]
+        );
     }
 
     #[test]
@@ -562,7 +636,7 @@ mod tests {
         p.add_resource_card(Resource::Brick, 1);
         p.add_resource_card(Resource::Lumber, 1);
 
-        let mut actions = p.get_available_actions(&board);
+        let mut actions = p.get_available_actions(&board, &[0u8; 5]);
         actions.sort();
         assert_eq!(
             actions,
@@ -582,7 +656,10 @@ mod tests {
         let mut p = Player::new(p0());
         p.add_resource_card(Resource::Brick, 1);
 
-        assert_eq!(p.get_available_actions(&board), [Action::EndTurn]);
+        assert_eq!(
+            p.get_available_actions(&board, &[0u8; 5]),
+            [Action::EndTurn]
+        );
     }
 
     #[test]
@@ -596,7 +673,7 @@ mod tests {
         p.add_resource_card(Resource::Grain, 1);
         p.add_resource_card(Resource::Wool, 1);
 
-        let mut actions = p.get_available_actions(&board);
+        let mut actions = p.get_available_actions(&board, &[0u8; 5]);
         actions.sort();
         assert_eq!(
             actions,
@@ -621,7 +698,7 @@ mod tests {
         p.add_resource_card(Resource::Ore, 3);
         p.add_resource_card(Resource::Grain, 2);
 
-        let mut actions = p.get_available_actions(&board);
+        let mut actions = p.get_available_actions(&board, &[0u8; 5]);
         actions.sort();
         assert_eq!(
             actions,
@@ -639,7 +716,10 @@ mod tests {
         p.add_resource_card(Resource::Ore, 3);
         p.add_resource_card(Resource::Grain, 2);
 
-        assert_eq!(p.get_available_actions(&board), [Action::EndTurn]);
+        assert_eq!(
+            p.get_available_actions(&board, &[0u8; 5]),
+            [Action::EndTurn]
+        );
     }
 
     #[test]
@@ -648,7 +728,7 @@ mod tests {
         let mut p = Player::new(p0());
         p.add_resource_card(Resource::Brick, 4);
 
-        let mut actions = p.get_available_actions(&board);
+        let mut actions = p.get_available_actions(&board, &[0u8; 5]);
         actions.sort();
         assert_eq!(
             actions,
@@ -669,7 +749,34 @@ mod tests {
         let mut p = Player::new(p0());
         p.add_resource_card(Resource::Brick, 3);
 
-        assert_eq!(p.get_available_actions(&board), [Action::EndTurn]);
+        assert_eq!(
+            p.get_available_actions(&board, &[0u8; 5]),
+            [Action::EndTurn]
+        );
+    }
+
+    #[test]
+    fn get_available_actions_road_building_dev_card_available_when_road_can_be_built()
+     {
+        let mut board = Board::new(&[]);
+        board.build_road(RoadId::new(0), p0());
+
+        let mut p = Player::new(p0());
+        p.cards[DevCard::RoadBuilding as usize] = 1;
+
+        let actions = p.get_available_actions(&board, &[0u8; 5]);
+        assert!(actions.contains(&Action::UseDevCard(DevCard::RoadBuilding)));
+    }
+
+    #[test]
+    fn get_available_actions_road_building_dev_card_not_available_when_no_road_can_be_built()
+     {
+        let board = Board::new(&[]);
+        let mut p = Player::new(p0());
+        p.cards[DevCard::RoadBuilding as usize] = 1;
+
+        let actions = p.get_available_actions(&board, &[0u8; 5]);
+        assert!(!actions.contains(&Action::UseDevCard(DevCard::RoadBuilding)));
     }
 
     // ---- get_available_nodes_for_initial_board_setup tests ----
@@ -804,7 +911,7 @@ mod tests {
             let mut p = Player::new(p0());
             p.add_resource_card(resource, 2);
 
-            let mut actions = p.get_available_actions(&board);
+            let mut actions = p.get_available_actions(&board, &[0u8; 5]);
             actions.sort();
             assert_eq!(
                 actions,
@@ -832,7 +939,10 @@ mod tests {
         let mut p = Player::new(p0());
         p.add_resource_card(Resource::Brick, 1);
 
-        assert_eq!(p.get_available_actions(&board), [Action::EndTurn]);
+        assert_eq!(
+            p.get_available_actions(&board, &[0u8; 5]),
+            [Action::EndTurn]
+        );
     }
 
     #[test]
@@ -846,7 +956,7 @@ mod tests {
             p.add_resource_card(r, 3);
         }
 
-        let mut actions = p.get_available_actions(&board);
+        let mut actions = p.get_available_actions(&board, &[0u8; 5]);
         actions.sort();
         let mut expected: Vec<Action> = Vec::new();
         for src in Resource::ALL {
@@ -866,7 +976,10 @@ mod tests {
         let mut p = Player::new(p0());
         p.add_resource_card(Resource::Brick, 2);
 
-        assert_eq!(p.get_available_actions(&board), [Action::EndTurn]);
+        assert_eq!(
+            p.get_available_actions(&board, &[0u8; 5]),
+            [Action::EndTurn]
+        );
     }
 
     #[test]
@@ -878,7 +991,10 @@ mod tests {
         let mut p = Player::new(p0());
         p.add_resource_card(Resource::Brick, 2);
 
-        assert_eq!(p.get_available_actions(&board), [Action::EndTurn]);
+        assert_eq!(
+            p.get_available_actions(&board, &[0u8; 5]),
+            [Action::EndTurn]
+        );
     }
 
     #[test]
@@ -890,7 +1006,7 @@ mod tests {
         let mut p = Player::new(p0());
         p.add_resource_card(Resource::Brick, 2);
 
-        let mut actions = p.get_available_actions(&board);
+        let mut actions = p.get_available_actions(&board, &[0u8; 5]);
         actions.sort();
         assert_eq!(
             actions,
@@ -915,7 +1031,7 @@ mod tests {
         let mut p = Player::new(p0());
         p.add_resource_card(Resource::Brick, 2);
 
-        let mut actions = p.get_available_actions(&board);
+        let mut actions = p.get_available_actions(&board, &[0u8; 5]);
         actions.sort();
         assert_eq!(
             actions,

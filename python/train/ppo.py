@@ -9,11 +9,11 @@ import torch
 
 SEED = 42
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DISCOUNT_FACTOR = 0.99
+DISCOUNT_FACTOR = 0.996
 EPSILON = 0.2
 
 ACTOR_INPUT_SIZE = 732
-ACTOR_OUTPUT_SIZE = 284
+ACTOR_OUTPUT_SIZE = 300
 
 
 def load_actor(path: str | Path, device: str | torch.device = DEVICE) -> FeedForwardNN:
@@ -437,52 +437,62 @@ class PPO:
     def validate(
         self,
         current_iter: int,
-        num_matches: int = 100,
+        num_matches_random: int = 100,
+        num_matches_checkpoint: int = 200,
         checkpoint_dir: str | Path = "checkpoints",
         checkpoint_step: int = 10,
     ) -> dict[str, float]:
         """Validate the trained actor against a random agent and past
         checkpoints at 90%, 75%, and 50% of `current_iter` (each floored to a
-        multiple of `checkpoint_step`). Plays `num_matches` per opponent.
+        multiple of `checkpoint_step`). Plays `num_matches_random` against the
+        random agent and `num_matches_checkpoint` per checkpoint opponent.
 
-        Results are cached by target iter so duplicates aren't re-run: a
-        percentage that floors to 0 reuses the random result, and percentages
-        that floor to the same checkpoint share a single eval. Win rate /
-        avg steps are NaN if a positive target's checkpoint is missing."""
+        Results are cached by target iter so duplicates aren't re-run:
+        percentages that floor to the same checkpoint share a single eval.
+        A percentage that floors to 0 falls back to the random agent and is
+        re-run at `num_matches_checkpoint` so its sample size matches the
+        other checkpoint comparisons. Win rate / avg steps are NaN if a
+        positive target's checkpoint is missing."""
         checkpoint_dir = Path(checkpoint_dir)
         out: dict[str, float] = {}
 
         random_metrics = self._play_eval(
-            num_matches, opponent_actor=None, desc="validate vs random"
+            num_matches_random, opponent_actor=None, desc="validate vs random"
         )
         out["win_rate_vs_random"] = random_metrics["win_rate"]
         out["avg_steps_vs_random"] = random_metrics["avg_steps"]
         out["avg_vp_vs_random"] = random_metrics["avg_vp"]
         out["avg_opp_vp_vs_random"] = random_metrics["avg_opp_vp"]
 
-        # 0 sentinel = random agent.
-        cache: dict[int, dict[str, float]] = {0: random_metrics}
+        cache: dict[int, dict[str, float]] = {}
 
         for pct, label in [(0.9, "90"), (0.75, "75"), (0.5, "50")]:
             target_iter = int(pct * current_iter)
             target_iter = (target_iter // checkpoint_step) * checkpoint_step
 
             if target_iter not in cache:
-                ckpt_path = checkpoint_dir / f"actor_iter_{target_iter}.pt"
-                if not ckpt_path.exists():
-                    cache[target_iter] = {
-                        "win_rate": float("nan"),
-                        "avg_steps": float("nan"),
-                        "avg_vp": float("nan"),
-                        "avg_opp_vp": float("nan"),
-                    }
-                else:
-                    opponent = load_actor(ckpt_path, DEVICE)
+                if target_iter == 0:
                     cache[target_iter] = self._play_eval(
-                        num_matches,
-                        opponent_actor=opponent,
-                        desc=f"validate vs {label}% (iter {target_iter})",
+                        num_matches_checkpoint,
+                        opponent_actor=None,
+                        desc=f"validate vs {label}% (random)",
                     )
+                else:
+                    ckpt_path = checkpoint_dir / f"actor_iter_{target_iter}.pt"
+                    if not ckpt_path.exists():
+                        cache[target_iter] = {
+                            "win_rate": float("nan"),
+                            "avg_steps": float("nan"),
+                            "avg_vp": float("nan"),
+                            "avg_opp_vp": float("nan"),
+                        }
+                    else:
+                        opponent = load_actor(ckpt_path, DEVICE)
+                        cache[target_iter] = self._play_eval(
+                            num_matches_checkpoint,
+                            opponent_actor=opponent,
+                            desc=f"validate vs {label}% (iter {target_iter})",
+                        )
 
             metrics = cache[target_iter]
             out[f"win_rate_vs_{label}"] = metrics["win_rate"]

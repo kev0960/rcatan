@@ -30,13 +30,31 @@ impl Resource {
 }
 
 #[repr(u8)]
-#[derive(Copy, Clone)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Copy, Clone)]
 pub enum DevCard {
     Knight = 5,
     VictoryPoint = 6,
     RoadBuilding = 7,
     YearOfPlenty = 8,
     Monopoly = 9,
+}
+
+impl DevCard {
+    pub const ALL: [DevCard; 5] = [
+        DevCard::Knight,
+        DevCard::VictoryPoint,
+        DevCard::RoadBuilding,
+        DevCard::YearOfPlenty,
+        DevCard::Monopoly,
+    ];
+
+    pub fn from_u8(u: u8) -> Self {
+        return DevCard::ALL[u as usize - 5];
+    }
+
+    pub fn from_array_index(idx: usize) -> Self {
+        return DevCard::ALL[idx];
+    }
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Copy, Clone)]
@@ -48,8 +66,10 @@ pub enum Action {
     MoveRobber(TileId),
     StealCard(PlayerId),
 
-    // BuyDevCard,
-    // UseDevCard(DevCard),
+    BuyDevCard,
+    UseDevCard(DevCard),
+    YearOfPlentyGetResource(Resource),
+    MonopolyGetResource(Resource),
 
     // Trades *not* between the player.
     MaritimeTrade((Resource, u8), Resource),

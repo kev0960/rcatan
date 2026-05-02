@@ -1,6 +1,7 @@
 use arrayvec::ArrayVec;
 use std::array::from_fn;
 
+use crate::action::DevCard;
 use crate::game_viewer::render_board;
 use crate::reward::Reward;
 use crate::reward::VictoryPoint;
@@ -24,10 +25,12 @@ use rand_chacha::ChaCha8Rng;
 static WINNING_VP: u8 = 10;
 
 struct GameDetail {
+    // Serialized information of "Longest road" and "Largest army"
     longest_road: u8,
+    largest_army: u8,
+
     // 4 bits for each player's victory points
     vp: VictoryPoint,
-    // largest_army: u8,
     total_turns: u16,
 }
 
@@ -35,31 +38,46 @@ impl GameDetail {
     fn new() -> Self {
         Self {
             longest_road: 0,
+            largest_army: 0,
             vp: VictoryPoint::new(ArrayVec::from([0; 4])),
             total_turns: 0,
-            // largest_army: 0,
         }
     }
 
     fn get_longest_road(&self) -> Option<(PlayerId, u8)> {
-        let has_longest_road = self.longest_road & 0b0000_0001;
-        if has_longest_road == 0 {
-            return None;
-        }
-
-        let player_id = (self.longest_road & 0b0000_0110) >> 1;
-        let road_length = self.longest_road >> 3;
-
-        Some((PlayerId::from(player_id), road_length))
+        Self::deserializer(&self.longest_road)
     }
 
     fn set_longest_road(&mut self, r: Option<(PlayerId, u8)>) {
+        Self::serializer(&mut self.longest_road, r);
+    }
+
+    fn get_largest_army(&self) -> Option<(PlayerId, u8)> {
+        Self::deserializer(&self.largest_army)
+    }
+
+    fn set_largest_army(&mut self, r: Option<(PlayerId, u8)>) {
+        Self::serializer(&mut self.largest_army, r);
+    }
+
+    fn serializer(data: &mut u8, r: Option<(PlayerId, u8)>) {
         if let Some((player_id, length)) = r {
-            self.longest_road =
-                0b0000_0001 | (u8::from(player_id) << 1) | (length << 3);
+            *data = 0b0000_0001 | (u8::from(player_id) << 1) | (length << 3);
         } else {
-            self.longest_road = 0;
+            *data &= 0b1111_1110;
         }
+    }
+
+    fn deserializer(data: &u8) -> Option<(PlayerId, u8)> {
+        let has_value = data & 0b0000_0001;
+        if has_value == 0 {
+            return None;
+        }
+
+        let player_id = (data & 0b0000_0110) >> 1;
+        let value = data >> 3;
+
+        Some((PlayerId::from(player_id), value))
     }
 }
 
@@ -91,6 +109,9 @@ enum GameState {
 
     // Game is ended with the given winner.
     GameEnded(PlayerId),
+
+    // (Dev card used, processed_once)
+    UsedDevCard((DevCard, bool)),
 }
 
 pub struct Game {
@@ -117,7 +138,7 @@ impl Game {
             board: Board::new_from_rand(&mut rng),
             players: ArrayVec::from(from_fn(|i| Player::new(i.into()))),
             current_player: 0,
-            dev_cards: ArrayVec::from([0; 5]),
+            dev_cards: ArrayVec::from([14, 5, 2, 2, 2]),
             game_detail: GameDetail::new(),
             state: GameState::InitialBoardSetup(0),
             last_dice_roll: None,
@@ -190,6 +211,13 @@ impl Game {
             GameState::StealResourceAfterRobber => Phase::StealResource,
             GameState::ContinueAction => Phase::ContinueAction,
             GameState::GameEnded(_) => Phase::GameEnded,
+            GameState::UsedDevCard((dev_card, _)) => match dev_card {
+                DevCard::Knight => Phase::StealResource,
+                DevCard::VictoryPoint => Phase::ContinueAction,
+                DevCard::RoadBuilding => Phase::ContinueAction,
+                DevCard::YearOfPlenty => Phase::ContinueAction,
+                DevCard::Monopoly => Phase::ContinueAction,
+            },
             // RollDice is transient: get_actions immediately rolls and
             // transitions to ContinueAction or Dice7Rolled. If a consumer ever
             // sees it (e.g. before any get_actions call) report it as
@@ -215,7 +243,7 @@ impl Game {
     //
     // It modifies the game state based on the actions that are
     // done (e.g. dice roll result)
-    pub fn get_actions(&mut self) -> Vec<Action> {
+    pub fn get_actions_and_advance_game_state(&mut self) -> Vec<Action> {
         // "RollDice" state is not a state visible to the agents.
         if let GameState::RollDice = self.state {
             let dice =
@@ -298,7 +326,10 @@ impl Game {
 
                 if player_set.is_empty() {
                     // Just continue as a regular turn.
-                    self.current_player_ref().get_available_actions(&self.board)
+                    self.current_player_ref().get_available_actions(
+                        &self.board,
+                        self.dev_cards.as_slice(),
+                    )
                 } else {
                     player_set
                         .into_iter()
@@ -330,9 +361,50 @@ impl Game {
                         .collect()
                 }
             }
+            GameState::UsedDevCard((dev_card, _)) => match dev_card {
+                DevCard::Knight => {
+                    self.state = GameState::StealResourceAfterRobber;
+
+                    return self
+                        .board
+                        .get_tile_without_robber()
+                        .into_iter()
+                        .map(Action::MoveRobber)
+                        .collect();
+                }
+                DevCard::VictoryPoint => {
+                    self.current_player_ref().get_available_actions(
+                        &self.board,
+                        self.dev_cards.as_slice(),
+                    )
+                }
+                DevCard::RoadBuilding => {
+                    return self
+                        .current_player_ref()
+                        .get_available_roads(&self.board)
+                        .into_iter()
+                        .map(Action::BuildRoad)
+                        .collect();
+                }
+                DevCard::YearOfPlenty => {
+                    return Resource::ALL
+                        .iter()
+                        .map(|r| Action::YearOfPlentyGetResource(*r))
+                        .collect();
+                }
+                DevCard::Monopoly => {
+                    return Resource::ALL
+                        .iter()
+                        .map(|r| Action::MonopolyGetResource(*r))
+                        .collect();
+                }
+            },
             GameState::ContinueAction => {
                 let current_player = self.current_player_ref();
-                current_player.get_available_actions(&self.board)
+                current_player.get_available_actions(
+                    &self.board,
+                    self.dev_cards.as_slice(),
+                )
             }
             GameState::RollDice | GameState::GameEnded(_) => {
                 panic!(
@@ -362,6 +434,32 @@ impl Game {
                     } else {
                         self.state =
                             GameState::InitialBoardSetup(current_order + 1);
+                    }
+                } else if let GameState::UsedDevCard((
+                    DevCard::RoadBuilding,
+                    processed_once,
+                )) = game_state
+                {
+                    if processed_once {
+                        self.state = GameState::ContinueAction;
+                    } else {
+                        // Borrow as a ref to pass self.board as ref.
+                        let current_player_ref = self.current_player_ref();
+                        // Only continue RoadBuilding if the player can build
+                        // another road.
+                        if current_player_ref.num_road < 15
+                            && current_player_ref
+                                .get_available_roads(&self.board)
+                                .len()
+                                > 0
+                        {
+                            self.state = GameState::UsedDevCard((
+                                DevCard::RoadBuilding,
+                                true,
+                            ));
+                        } else {
+                            self.state = GameState::ContinueAction;
+                        }
                     }
                 } else {
                     current_player.cards[Resource::Brick as usize] -= 1;
@@ -436,10 +534,114 @@ impl Game {
                 }
             }
             Action::EndTurn => {
+                self.current_player_mut().end_player_turn();
                 self.current_player = (self.current_player + 1) % 4;
                 self.state = GameState::RollDice;
                 self.last_dice_roll = None;
                 self.game_detail.total_turns += 1;
+            }
+            Action::BuyDevCard => {
+                let dev_card = self.get_random_dev_card();
+
+                let current_player = self.current_player_mut();
+                current_player.cards[Resource::Ore as usize] -= 1;
+                current_player.cards[Resource::Grain as usize] -= 1;
+                current_player.cards[Resource::Wool as usize] -= 1;
+                current_player.add_dev_card(dev_card);
+            }
+            Action::UseDevCard(dev_card) => {
+                self.current_player_mut().use_dev_card(dev_card);
+
+                match dev_card {
+                    DevCard::Knight => {
+                        self.state =
+                            GameState::UsedDevCard((DevCard::Knight, false));
+
+                        let num_used_knight_cards =
+                            self.current_player_ref().num_used_knight_cards;
+                        if num_used_knight_cards >= 3 {
+                            if let Some((_, count)) =
+                                self.game_detail.get_largest_army()
+                            {
+                                if count < num_used_knight_cards {
+                                    self.game_detail.set_largest_army(Some((
+                                        self.current_player_id(),
+                                        num_used_knight_cards,
+                                    )));
+                                }
+                            } else {
+                                self.game_detail.set_largest_army(Some((
+                                    self.current_player_id(),
+                                    num_used_knight_cards,
+                                )));
+                            }
+
+                            should_recompute_vp = true;
+                        }
+                    }
+                    DevCard::VictoryPoint => {
+                        self.state = GameState::ContinueAction;
+                        should_recompute_vp = true;
+                    }
+                    DevCard::RoadBuilding => {
+                        self.state = GameState::UsedDevCard((
+                            DevCard::RoadBuilding,
+                            false,
+                        ));
+                    }
+                    DevCard::YearOfPlenty => {
+                        self.state = GameState::UsedDevCard((
+                            DevCard::YearOfPlenty,
+                            false,
+                        ));
+                    }
+                    DevCard::Monopoly => {
+                        self.state =
+                            GameState::UsedDevCard((DevCard::Monopoly, false));
+                    }
+                }
+            }
+            Action::YearOfPlentyGetResource(resource) => {
+                let current_player = self.current_player_mut();
+                current_player.add_resource_card(resource, 1);
+
+                if let GameState::UsedDevCard((
+                    DevCard::YearOfPlenty,
+                    processed_once,
+                )) = self.state
+                {
+                    if processed_once {
+                        self.state = GameState::ContinueAction;
+                    } else {
+                        self.state = GameState::UsedDevCard((
+                            DevCard::YearOfPlenty,
+                            true,
+                        ));
+                    }
+                } else {
+                    panic!(
+                        "Year of plenty can only be used when the game state is set as YearOfPlenty"
+                    )
+                }
+            }
+            Action::MonopolyGetResource(resource) => {
+                let current_player_id = self.current_player_id();
+
+                let mut total_cards = 0;
+                for player in &mut self.players {
+                    if player.id == current_player_id {
+                        continue;
+                    }
+
+                    let num_cards = player.cards[resource as usize];
+                    total_cards += num_cards;
+                    player.use_resource_card(resource, num_cards);
+                }
+
+                self.current_player_mut()
+                    .add_resource_card(resource, total_cards);
+
+                self.state = GameState::ContinueAction;
             }
         }
 
@@ -468,7 +670,7 @@ impl Game {
 
     // Run "one step". Returns the player id when the game is ended. Otherwise returns None.
     fn step(&mut self) -> Option<PlayerId> {
-        let mut actions = self.get_actions();
+        let mut actions = self.get_actions_and_advance_game_state();
 
         let action_index = self.rng.random_range(0..actions.len());
         let action = actions.swap_remove(action_index);
@@ -489,6 +691,14 @@ impl Game {
         for (player, resource, num) in resources {
             self.players[usize::from(player)].add_resource_card(resource, num);
         }
+    }
+
+    fn get_random_dev_card(&mut self) -> DevCard {
+        // NOTE: callers of this function should ensure that there is at least one dev card left.
+        let dev_card = choose_weighted(&self.dev_cards, &mut self.rng);
+
+        self.dev_cards[dev_card] -= 1;
+        DevCard::from_array_index(dev_card)
     }
 
     fn compute_rewards(&mut self, requires_vp_recompute: bool) -> Reward {
@@ -519,9 +729,18 @@ impl Game {
         for (id, p) in self.players.iter().enumerate() {
             vps[id] += p.num_settlement;
             vps[id] += p.num_city * 2;
+            vps[id] += p.cards[DevCard::VictoryPoint as usize];
+
+            // VP cards that are bought at the given turn has an effect
+            // immediately.
+            vps[id] += p.dev_card_bought[DevCard::VictoryPoint as usize - 5];
         }
 
         if let Some((p, _)) = self.game_detail.get_longest_road() {
+            vps[usize::from(p)] += 2;
+        }
+
+        if let Some((p, _)) = self.game_detail.get_largest_army() {
             vps[usize::from(p)] += 2;
         }
 
@@ -661,6 +880,46 @@ mod tests {
             assert_eq!(player, p(id));
             assert_eq!(length, 5 + id as u8);
         }
+    }
+
+    #[test]
+    fn game_detail_initially_no_largest_army() {
+        let detail = GameDetail::new();
+        assert_eq!(detail.get_largest_army(), None);
+    }
+
+    #[test]
+    fn game_detail_set_and_get_largest_army() {
+        let mut detail = GameDetail::new();
+        detail.set_largest_army(Some((p(2), 5)));
+        assert_eq!(detail.get_largest_army(), Some((p(2), 5)));
+    }
+
+    #[test]
+    fn game_detail_clear_largest_army() {
+        let mut detail = GameDetail::new();
+        detail.set_largest_army(Some((p(1), 3)));
+        detail.set_largest_army(None);
+        assert_eq!(detail.get_largest_army(), None);
+    }
+
+    #[test]
+    fn game_detail_set_largest_army_overwrites_previous_value() {
+        // Regression: an earlier refactor used `|=` which OR-merged stale bits
+        // from a prior holder into the new value.
+        let mut detail = GameDetail::new();
+        detail.set_largest_army(Some((p(0), 3)));
+        detail.set_largest_army(Some((p(1), 4)));
+        assert_eq!(detail.get_largest_army(), Some((p(1), 4)));
+    }
+
+    #[test]
+    fn game_detail_largest_army_independent_from_longest_road() {
+        let mut detail = GameDetail::new();
+        detail.set_longest_road(Some((p(0), 5)));
+        detail.set_largest_army(Some((p(2), 3)));
+        assert_eq!(detail.get_longest_road(), Some((p(0), 5)));
+        assert_eq!(detail.get_largest_army(), Some((p(2), 3)));
     }
 
     // ---- Game initialization ----
@@ -930,7 +1189,7 @@ mod tests {
         // --- Phase 1: Discard ---
 
         // Player 1 (8 cards, target 4) should discard first.
-        let actions = game.get_actions();
+        let actions = game.get_actions_and_advance_game_state();
         assert!(
             actions
                 .iter()
@@ -951,7 +1210,7 @@ mod tests {
         assert_eq!(game.players[1].num_resource_cards(), 4);
 
         // Player 2 (9 cards, target 5) should discard next.
-        let actions = game.get_actions();
+        let actions = game.get_actions_and_advance_game_state();
         assert!(
             actions
                 .iter()
@@ -974,7 +1233,7 @@ mod tests {
         // --- Phase 2: Move Robber ---
 
         // All discards done. Current player should be restored to player 0 (who rolled).
-        let actions = game.get_actions();
+        let actions = game.get_actions_and_advance_game_state();
         assert!(actions.iter().all(|a| matches!(a, Action::MoveRobber(_))));
         assert_eq!(game.current_player, 0);
 
@@ -983,7 +1242,7 @@ mod tests {
 
         // --- Phase 3: Steal ---
 
-        let actions = game.get_actions();
+        let actions = game.get_actions_and_advance_game_state();
         assert_eq!(actions, vec![Action::StealCard(p(2))]);
 
         game.run_action(Action::StealCard(p(2)));
@@ -991,5 +1250,425 @@ mod tests {
         // Player 0 gained one card, player 2 lost one.
         assert_eq!(game.players[0].num_resource_cards(), 1);
         assert_eq!(game.players[2].num_resource_cards(), 4);
+    }
+
+    // ---- Dev card tests ----
+
+    fn game_in_continue_action() -> Game {
+        let mut game = game_with_empty_board();
+        game.state = GameState::ContinueAction;
+        game
+    }
+
+    #[test]
+    fn buy_dev_card_deducts_resources_and_buffers_card() {
+        let mut game = game_in_continue_action();
+        game.dev_cards = ArrayVec::from([14, 5, 2, 2, 2]);
+        game.players[0].cards[Resource::Ore as usize] = 1;
+        game.players[0].cards[Resource::Grain as usize] = 1;
+        game.players[0].cards[Resource::Wool as usize] = 1;
+
+        game.run_action(Action::BuyDevCard);
+
+        assert_eq!(game.players[0].cards[Resource::Ore as usize], 0);
+        assert_eq!(game.players[0].cards[Resource::Grain as usize], 0);
+        assert_eq!(game.players[0].cards[Resource::Wool as usize], 0);
+        assert_eq!(game.players[0].dev_card_bought.iter().sum::<u8>(), 1);
+        // Deck went down by one.
+        assert_eq!(game.dev_cards.iter().sum::<u8>(), 24);
+    }
+
+    #[test]
+    fn end_turn_migrates_bought_dev_cards_to_hand() {
+        let mut game = game_with_empty_board();
+        game.players[0].add_dev_card(DevCard::Knight);
+        game.players[0].add_dev_card(DevCard::Monopoly);
+
+        game.run_action(Action::EndTurn);
+
+        assert_eq!(game.players[0].dev_card_bought.iter().sum::<u8>(), 0);
+        assert_eq!(game.players[0].cards[DevCard::Knight as usize], 1);
+        assert_eq!(game.players[0].cards[DevCard::Monopoly as usize], 1);
+    }
+
+    #[test]
+    fn cannot_play_dev_card_bought_this_turn() {
+        let mut game = game_in_continue_action();
+        game.dev_cards = ArrayVec::from([14, 0, 0, 0, 0]);
+        game.players[0].cards[Resource::Ore as usize] = 1;
+        game.players[0].cards[Resource::Grain as usize] = 1;
+        game.players[0].cards[Resource::Wool as usize] = 1;
+
+        game.run_action(Action::BuyDevCard);
+
+        let actions = game.get_actions_and_advance_game_state();
+        assert!(
+            !actions.iter().any(|a| matches!(a, Action::UseDevCard(_))),
+            "should not be able to play a dev card bought this turn"
+        );
+    }
+
+    #[test]
+    fn cannot_buy_dev_card_when_deck_empty() {
+        let mut game = game_in_continue_action();
+        game.players[0].cards[Resource::Ore as usize] = 5;
+        game.players[0].cards[Resource::Grain as usize] = 5;
+        game.players[0].cards[Resource::Wool as usize] = 5;
+
+        let actions = game.get_actions_and_advance_game_state();
+        assert!(!actions.iter().any(|a| matches!(a, Action::BuyDevCard)));
+    }
+
+    #[test]
+    fn use_knight_offers_move_robber_and_consumes_card() {
+        let rng = ChaCha8Rng::seed_from_u64(0);
+        let mut game = Game {
+            board: Board::new(&[(2, TileType::Desert), (5, TileType::Forest)]),
+            players: ArrayVec::from(from_fn(|i| Player::new(i.into()))),
+            current_player: 0,
+            dev_cards: ArrayVec::from([0; 5]),
+            game_detail: GameDetail::new(),
+            state: GameState::ContinueAction,
+            last_dice_roll: None,
+            rng,
+        };
+        game.players[0].cards[DevCard::Knight as usize] = 1;
+
+        game.run_action(Action::UseDevCard(DevCard::Knight));
+        let actions = game.get_actions_and_advance_game_state();
+
+        assert!(actions.iter().all(|a| matches!(a, Action::MoveRobber(_))));
+        assert!(!actions.is_empty());
+        assert_eq!(game.players[0].cards[DevCard::Knight as usize], 0);
+    }
+
+    #[test]
+    fn use_knight_full_flow_steals_resource() {
+        let rng = ChaCha8Rng::seed_from_u64(0);
+        let mut game = Game {
+            board: Board::new(&[(2, TileType::Desert), (5, TileType::Forest)]),
+            players: ArrayVec::from(from_fn(|i| Player::new(i.into()))),
+            current_player: 0,
+            dev_cards: ArrayVec::from([0; 5]),
+            game_detail: GameDetail::new(),
+            state: GameState::ContinueAction,
+            last_dice_roll: None,
+            rng,
+        };
+        game.players[0].cards[DevCard::Knight as usize] = 1;
+        game.players[1].add_resource_card(Resource::Wool, 1);
+        // Tile 1's nodes include node 1.
+        game.board
+            .build_structure(NodeId::new(1), p(1), Building::Settlement);
+
+        game.run_action(Action::UseDevCard(DevCard::Knight));
+        let _ = game.get_actions_and_advance_game_state();
+        game.run_action(Action::MoveRobber(TileId::from(1usize)));
+
+        let actions = game.get_actions_and_advance_game_state();
+        assert_eq!(actions, vec![Action::StealCard(p(1))]);
+        game.run_action(Action::StealCard(p(1)));
+
+        assert_eq!(game.players[0].num_resource_cards(), 1);
+        assert_eq!(game.players[1].num_resource_cards(), 0);
+    }
+
+    #[test]
+    fn using_two_knights_does_not_grant_largest_army() {
+        let mut game = game_in_continue_action();
+        game.players[0].cards[DevCard::Knight as usize] = 1;
+        game.players[0].num_used_knight_cards = 1;
+
+        game.run_action(Action::UseDevCard(DevCard::Knight));
+
+        assert_eq!(game.players[0].num_used_knight_cards, 2);
+        assert_eq!(game.game_detail.get_largest_army(), None);
+    }
+
+    #[test]
+    fn using_third_knight_grants_largest_army() {
+        let mut game = game_in_continue_action();
+        game.players[0].cards[DevCard::Knight as usize] = 1;
+        game.players[0].num_used_knight_cards = 2;
+
+        game.run_action(Action::UseDevCard(DevCard::Knight));
+
+        assert_eq!(game.players[0].num_used_knight_cards, 3);
+        assert_eq!(game.game_detail.get_largest_army(), Some((p(0), 3)));
+    }
+
+    #[test]
+    fn knight_beyond_third_extends_holders_count() {
+        let mut game = game_in_continue_action();
+        game.players[0].cards[DevCard::Knight as usize] = 1;
+        game.players[0].num_used_knight_cards = 4;
+        game.game_detail.set_largest_army(Some((p(0), 4)));
+
+        game.run_action(Action::UseDevCard(DevCard::Knight));
+
+        assert_eq!(game.game_detail.get_largest_army(), Some((p(0), 5)));
+    }
+
+    #[test]
+    fn tying_knight_count_does_not_steal_largest_army() {
+        let mut game = game_in_continue_action();
+        // Player 0 holds the army with 3 knights.
+        game.game_detail.set_largest_army(Some((p(0), 3)));
+
+        // Player 1 plays their 3rd knight — same count, no steal.
+        game.current_player = 1;
+        game.players[1].cards[DevCard::Knight as usize] = 1;
+        game.players[1].num_used_knight_cards = 2;
+
+        game.run_action(Action::UseDevCard(DevCard::Knight));
+
+        assert_eq!(game.players[1].num_used_knight_cards, 3);
+        assert_eq!(game.game_detail.get_largest_army(), Some((p(0), 3)));
+    }
+
+    #[test]
+    fn strictly_greater_knight_count_steals_largest_army() {
+        let mut game = game_in_continue_action();
+        game.game_detail.set_largest_army(Some((p(0), 3)));
+
+        // Player 1 plays their 4th knight — strictly greater, takes the army.
+        game.current_player = 1;
+        game.players[1].cards[DevCard::Knight as usize] = 1;
+        game.players[1].num_used_knight_cards = 3;
+
+        game.run_action(Action::UseDevCard(DevCard::Knight));
+
+        assert_eq!(game.game_detail.get_largest_army(), Some((p(1), 4)));
+    }
+
+    #[test]
+    fn largest_army_grants_two_victory_points() {
+        let mut game = game_with_empty_board();
+        game.players[0].num_settlement = 2;
+        game.game_detail.set_largest_army(Some((p(0), 3)));
+
+        game.compute_victory_point();
+
+        // 2 settlements + 2 (largest army) = 4
+        assert_eq!(game.game_detail.vp.get_vp(p(0)), 4);
+    }
+
+    #[test]
+    fn largest_army_holder_loses_two_vp_when_overtaken() {
+        let mut game = game_in_continue_action();
+        game.players[0].num_settlement = 2;
+        game.players[1].num_settlement = 2;
+        game.game_detail.set_largest_army(Some((p(0), 3)));
+
+        // Recompute baseline so p(0) gets the +2.
+        game.compute_victory_point();
+        assert_eq!(game.game_detail.vp.get_vp(p(0)), 4);
+        assert_eq!(game.game_detail.vp.get_vp(p(1)), 2);
+
+        // Player 1 takes the army with their 4th knight.
+        game.current_player = 1;
+        game.players[1].cards[DevCard::Knight as usize] = 1;
+        game.players[1].num_used_knight_cards = 3;
+        game.run_action(Action::UseDevCard(DevCard::Knight));
+
+        assert_eq!(game.game_detail.vp.get_vp(p(0)), 2); // lost the +2
+        assert_eq!(game.game_detail.vp.get_vp(p(1)), 4); // gained the +2
+    }
+
+    #[test]
+    fn use_year_of_plenty_grants_two_resources() {
+        let mut game = game_in_continue_action();
+        game.players[0].cards[DevCard::YearOfPlenty as usize] = 1;
+
+        game.run_action(Action::UseDevCard(DevCard::YearOfPlenty));
+
+        let actions = game.get_actions_and_advance_game_state();
+        assert!(
+            actions
+                .iter()
+                .all(|a| matches!(a, Action::YearOfPlentyGetResource(_)))
+        );
+        game.run_action(Action::YearOfPlentyGetResource(Resource::Ore));
+
+        let actions = game.get_actions_and_advance_game_state();
+        assert!(
+            actions
+                .iter()
+                .all(|a| matches!(a, Action::YearOfPlentyGetResource(_))),
+            "second resource pick should still be in the YearOfPlenty flow"
+        );
+        game.run_action(Action::YearOfPlentyGetResource(Resource::Grain));
+
+        assert_eq!(game.players[0].cards[Resource::Ore as usize], 1);
+        assert_eq!(game.players[0].cards[Resource::Grain as usize], 1);
+        assert!(matches!(game.state, GameState::ContinueAction));
+    }
+
+    #[test]
+    fn use_monopoly_takes_all_of_chosen_resource() {
+        let mut game = game_in_continue_action();
+        game.players[0].cards[DevCard::Monopoly as usize] = 1;
+        game.players[1].add_resource_card(Resource::Wool, 3);
+        game.players[2].add_resource_card(Resource::Wool, 2);
+        game.players[3].add_resource_card(Resource::Wool, 1);
+        // Other resources must be untouched.
+        game.players[1].add_resource_card(Resource::Brick, 5);
+
+        game.run_action(Action::UseDevCard(DevCard::Monopoly));
+        game.run_action(Action::MonopolyGetResource(Resource::Wool));
+
+        assert_eq!(game.players[0].cards[Resource::Wool as usize], 6);
+        assert_eq!(game.players[1].cards[Resource::Wool as usize], 0);
+        assert_eq!(game.players[2].cards[Resource::Wool as usize], 0);
+        assert_eq!(game.players[3].cards[Resource::Wool as usize], 0);
+        assert_eq!(game.players[1].cards[Resource::Brick as usize], 5);
+        assert!(matches!(game.state, GameState::ContinueAction));
+    }
+
+    #[test]
+    fn road_building_not_offered_when_no_available_roads() {
+        let mut game = game_in_continue_action();
+        game.players[0].cards[DevCard::RoadBuilding as usize] = 1;
+        // No existing road or settlement → no road can be extended from.
+
+        let actions = game.get_actions_and_advance_game_state();
+        assert!(
+            !actions.iter().any(|a| matches!(
+                a,
+                Action::UseDevCard(DevCard::RoadBuilding)
+            )),
+            "RoadBuilding should not be offered when no roads can be built"
+        );
+    }
+
+    #[test]
+    fn road_building_not_offered_when_no_roads_left_in_stock() {
+        let mut game = game_in_continue_action();
+        game.players[0].cards[DevCard::RoadBuilding as usize] = 1;
+        // Legal location exists, but the player has placed all 15 roads.
+        game.board.build_road(RoadId::new(0), p(0));
+        game.players[0].num_road = 15;
+
+        let actions = game.get_actions_and_advance_game_state();
+        assert!(
+            !actions.iter().any(|a| matches!(
+                a,
+                Action::UseDevCard(DevCard::RoadBuilding)
+            )),
+            "RoadBuilding should not be offered when stock is exhausted"
+        );
+    }
+
+    #[test]
+    fn use_road_building_grants_two_free_roads() {
+        let mut game = game_in_continue_action();
+        game.players[0].cards[DevCard::RoadBuilding as usize] = 1;
+        // Seed an existing road so get_available_roads has somewhere to extend.
+        game.board.build_road(RoadId::new(0), p(0));
+
+        game.run_action(Action::UseDevCard(DevCard::RoadBuilding));
+
+        let actions = game.get_actions_and_advance_game_state();
+        assert!(actions.iter().all(|a| matches!(a, Action::BuildRoad(_))));
+        let r = match actions[0] {
+            Action::BuildRoad(r) => r,
+            _ => unreachable!(),
+        };
+        game.run_action(Action::BuildRoad(r));
+
+        let actions = game.get_actions_and_advance_game_state();
+        assert!(
+            actions.iter().all(|a| matches!(a, Action::BuildRoad(_))),
+            "second free road should still be available"
+        );
+        let r = match actions[0] {
+            Action::BuildRoad(r) => r,
+            _ => unreachable!(),
+        };
+        game.run_action(Action::BuildRoad(r));
+
+        assert_eq!(game.players[0].num_road, 2);
+        // No resources should have been deducted.
+        assert_eq!(game.players[0].cards[Resource::Brick as usize], 0);
+        assert_eq!(game.players[0].cards[Resource::Lumber as usize], 0);
+        assert!(matches!(game.state, GameState::ContinueAction));
+    }
+
+    #[test]
+    fn vp_card_in_hand_counts_for_victory_points() {
+        let mut game = game_with_empty_board();
+        game.players[0].cards[DevCard::VictoryPoint as usize] = 2;
+        game.players[0].num_settlement = 3;
+
+        game.compute_victory_point();
+        assert_eq!(game.game_detail.vp.get_vp(p(0)), 5);
+    }
+
+    #[test]
+    fn vp_card_just_bought_counts_immediately() {
+        let mut game = game_with_empty_board();
+        game.players[0].dev_card_bought[DevCard::VictoryPoint as usize - 5] = 1;
+        game.players[0].num_settlement = 2;
+
+        game.compute_victory_point();
+        assert_eq!(game.game_detail.vp.get_vp(p(0)), 3);
+    }
+
+    #[test]
+    fn vp_card_is_not_listed_as_playable() {
+        let mut game = game_in_continue_action();
+        game.players[0].cards[DevCard::VictoryPoint as usize] = 3;
+
+        let actions = game.get_actions_and_advance_game_state();
+        assert!(
+            !actions.iter().any(|a| matches!(
+                a,
+                Action::UseDevCard(DevCard::VictoryPoint)
+            )),
+            "VP cards must not be offered as a playable action"
+        );
+    }
+
+    #[test]
+    fn cannot_play_two_dev_cards_in_one_turn() {
+        let mut game = game_in_continue_action();
+        game.players[0].cards[DevCard::Monopoly as usize] = 1;
+        game.players[0].cards[DevCard::YearOfPlenty as usize] = 1;
+
+        game.run_action(Action::UseDevCard(DevCard::Monopoly));
+        game.run_action(Action::MonopolyGetResource(Resource::Brick));
+
+        let actions = game.get_actions_and_advance_game_state();
+        assert!(
+            !actions.iter().any(|a| matches!(a, Action::UseDevCard(_))),
+            "should not be able to play a second dev card on the same turn"
+        );
+    }
+
+    #[test]
+    fn end_turn_lets_player_play_dev_card_next_turn() {
+        let mut game = game_in_continue_action();
+        game.players[0].cards[DevCard::Monopoly as usize] = 2;
+
+        game.run_action(Action::UseDevCard(DevCard::Monopoly));
+        game.run_action(Action::MonopolyGetResource(Resource::Brick));
+
+        // Mid-turn: flag is set, no UseDevCard offered.
+        let actions = game.get_actions_and_advance_game_state();
+        assert!(!actions.iter().any(|a| matches!(a, Action::UseDevCard(_))));
+
+        // EndTurn must reset the flag for player 0. Manually return to player 0
+        // in ContinueAction to bypass the dice-roll randomness.
+        game.run_action(Action::EndTurn);
+        game.current_player = 0;
+        game.state = GameState::ContinueAction;
+
+        let actions = game.get_actions_and_advance_game_state();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::UseDevCard(DevCard::Monopoly))),
+            "player 0 should be able to play a dev card on their next turn"
+        );
     }
 }

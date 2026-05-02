@@ -3,11 +3,11 @@ use numpy::{IntoPyArray, PyArray1, PyArray2};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rcatan::{
-    Action, Building, Engine, FullState, Phase, PlayerId, Resource, State,
-    TileType,
+    Action, Building, DevCard, Engine, FullState, Phase, PlayerId, Resource,
+    State, TileType,
 };
 
-// Action space layout (284 total):
+// Action space layout (300 total):
 //   [  0,  72)  BuildRoad(road_id)
 //   [ 72, 126)  BuildStructure(Settlement, node_id)
 //   [126, 180)  BuildStructure(City, node_id)
@@ -17,7 +17,15 @@ use rcatan::{
 //   [208, 283)  MaritimeTrade  (give_resource * 15 + amount_idx * 5 + want_resource)
 //               amount_idx: 0 = give 2, 1 = give 3, 2 = give 4
 //   283         EndTurn
-const NUM_ACTIONS: usize = 284;
+//   284         BuyDevCard
+//   [285, 290)  UseDevCard(dev_card)               (DevCard::ALL order)
+//   [290, 295)  YearOfPlentyGetResource(resource)
+//   [295, 300)  MonopolyGetResource(resource)
+const NUM_ACTIONS: usize = 300;
+
+fn dev_card_index(d: DevCard) -> usize {
+    d as usize - 5
+}
 
 fn action_to_index(action: &Action) -> usize {
     match action {
@@ -36,6 +44,10 @@ fn action_to_index(action: &Action) -> usize {
             208 + (*give_r as usize) * 15 + amt_idx * 5 + (*want_r as usize)
         }
         Action::EndTurn => 283,
+        Action::BuyDevCard => 284,
+        Action::UseDevCard(d) => 285 + dev_card_index(*d),
+        Action::YearOfPlentyGetResource(r) => 290 + *r as usize,
+        Action::MonopolyGetResource(r) => 295 + *r as usize,
     }
 }
 
@@ -60,6 +72,10 @@ fn index_to_action(index: usize) -> Action {
             Action::MaritimeTrade((give_r, (amt_idx + 2) as u8), want_r)
         }
         283 => Action::EndTurn,
+        284 => Action::BuyDevCard,
+        285..290 => Action::UseDevCard(DevCard::from_array_index(index - 285)),
+        290..295 => Action::YearOfPlentyGetResource(Resource::ALL[index - 290]),
+        295..300 => Action::MonopolyGetResource(Resource::ALL[index - 295]),
         _ => panic!("invalid action index: {index}"),
     }
 }

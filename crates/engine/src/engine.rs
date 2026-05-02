@@ -32,7 +32,7 @@ impl Engine {
     }
 
     pub fn get_actions(&mut self) -> Vec<Vec<Action>> {
-        self.games.iter_mut().map(|g| g.get_actions()).collect()
+        self.games.iter_mut().map(|g| g.get_actions_and_advance_game_state()).collect()
     }
 
     // Returns reward and VPs (only when the corresponding game has ended)
@@ -95,11 +95,11 @@ mod tests {
     }
 
     #[test]
-    fn run_32_games_1000_steps() {
+    fn run_32_games_5000_steps() {
         let mut engine = Engine::new(32, /*seed=*/ 42);
         let mut rng = ChaCha8Rng::seed_from_u64(615);
 
-        for _ in 0..1000 {
+        for _ in 0..5000 {
             let actions_per_game = engine.get_actions();
             let chosen: Vec<Action> = actions_per_game
                 .into_iter()

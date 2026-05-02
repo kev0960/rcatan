@@ -12,6 +12,7 @@ mod util;
 
 pub use action::Action;
 pub use action::Building;
+pub use action::DevCard;
 pub use action::Resource;
 pub use board::TileType;
 pub use engine::Engine;
