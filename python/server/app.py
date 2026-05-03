@@ -29,7 +29,7 @@ from starlette.routing import Route
 from .bot import Bot, RandomBot
 from .session import GameSession
 
-NUM_ACTIONS = 284
+NUM_ACTIONS = 300
 CHECKPOINT_PATH = Path(
     os.environ.get("CATAN_ACTOR_CHECKPOINT", "checkpoints/actor_latest.pt")
 )

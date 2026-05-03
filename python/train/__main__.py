@@ -1,4 +1,5 @@
 import csv
+from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
 from train.ppo import PPO
@@ -12,8 +13,9 @@ VALIDATE_EVERY = 10
 VALIDATE_MATCHES_RANDOM = 100
 VALIDATE_MATCHES_CHECKPOINT = 200
 LOG_DIR = Path("logs")
-TRAIN_LOG = LOG_DIR / "train.csv"
-VALIDATION_LOG = LOG_DIR / "validation.csv"
+RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
+TRAIN_LOG = LOG_DIR / f"train-{RUN_TIMESTAMP}.csv"
+VALIDATION_LOG = LOG_DIR / f"validation-{RUN_TIMESTAMP}.csv"
 CHECKPOINT_DIR = Path("checkpoints")
 LATEST_CHECKPOINT = CHECKPOINT_DIR / "actor_latest.pt"
 

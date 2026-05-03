@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-HIDDEN_SIZE = 256
+HIDDEN_SIZE = 512
 
 
 class FeedForwardNN(nn.Module):

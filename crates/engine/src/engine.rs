@@ -31,8 +31,8 @@ impl Engine {
         self.games.iter().map(|g| g.vps()).collect()
     }
 
-    pub fn get_actions(&mut self) -> Vec<Vec<Action>> {
-        self.games.iter_mut().map(|g| g.get_actions_and_advance_game_state()).collect()
+    pub fn get_actions(&self) -> Vec<Vec<Action>> {
+        self.games.iter().map(|g| g.get_actions()).collect()
     }
 
     // Returns reward and VPs (only when the corresponding game has ended)

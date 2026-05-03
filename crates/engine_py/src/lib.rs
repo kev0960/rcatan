@@ -201,9 +201,11 @@ impl PyEngine {
         ))
     }
 
-    /// Returns a boolean action mask per game: list[list[bool]] of shape (batch_size, 284).
+    // Returns a boolean action mask per game of shape (batch_size,
+    // NUM_ACTIONS). Idempotent — calling twice in a row returns the same mask
+    // without changing engine state.
     fn get_action_mask<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArray2<bool>>> {
         let masks: Vec<bool> = self
@@ -348,7 +350,11 @@ fn full_state_to_dict<'py>(
             Phase::InitialRoadPlacement => ("initial_road_placement", None),
             Phase::Discard { target_counts } => {
                 let pd = PyDict::new(py);
-                pd.set_item("target_counts", target_counts.to_vec())?;
+                // pyo3 maps Vec<u8> to Python `bytes`, which json.dumps
+                // can't serialize. Widen to u32 so it lands as list[int].
+                let counts: Vec<u32> =
+                    target_counts.iter().map(|&c| c as u32).collect();
+                pd.set_item("target_counts", counts)?;
                 ("discard", Some(pd))
             }
             Phase::MoveRobber => ("move_robber", None),

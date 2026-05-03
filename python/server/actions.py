@@ -9,13 +9,42 @@ Mirrors the layout in `crates/engine_py/src/lib.rs`:
   [204, 208)  steal_card(player_id)
   [208, 283)  maritime_trade(give_resource, give_amount, want_resource)
   283         end_turn
+  284         buy_dev_card
+  [285, 290)  play_dev_card (DevCard::ALL order: knight, vp, road_building, yop, monopoly)
+  [290, 295)  year_of_plenty_select(resource)
+  [295, 300)  monopoly_select(resource)
 """
 
 from typing import TypedDict
 
-NUM_ACTIONS = 284
+NUM_ACTIONS = 300
 
 RESOURCES = ["brick", "lumber", "ore", "grain", "wool"]
+
+# DevCard::ALL order in `crates/engine/src/action.rs`.
+DEV_CARDS = [
+    "knight",
+    "victory_point",
+    "road_building",
+    "year_of_plenty",
+    "monopoly",
+]
+
+PLAY_DEV_CARD_KINDS = {
+    "knight": "play_knight",
+    "victory_point": "play_victory_point",
+    "road_building": "play_road_building",
+    "year_of_plenty": "play_year_of_plenty",
+    "monopoly": "play_monopoly",
+}
+
+PLAY_DEV_CARD_LABELS = {
+    "knight": "Play knight",
+    "victory_point": "Reveal victory point",
+    "road_building": "Play road building",
+    "year_of_plenty": "Play year of plenty",
+    "monopoly": "Play monopoly",
+}
 
 
 class DecodedAction(TypedDict, total=False):
@@ -31,6 +60,7 @@ class DecodedAction(TypedDict, total=False):
     give_resource: str
     give_amount: int
     want_resource: str
+    dev_card: str
 
 
 def decode_action(index: int) -> DecodedAction:
@@ -100,4 +130,30 @@ def decode_action(index: int) -> DecodedAction:
                 f"Trade {give_amount} {give_resource} → 1 {want_resource}"
             ),
         }
-    return {"index": 283, "kind": "end_turn", "label": "End turn"}
+    if index == 283:
+        return {"index": 283, "kind": "end_turn", "label": "End turn"}
+    if index == 284:
+        return {"index": 284, "kind": "buy_dev_card", "label": "Buy dev card"}
+    if index < 290:
+        dev_card = DEV_CARDS[index - 285]
+        return {
+            "index": index,
+            "kind": PLAY_DEV_CARD_KINDS[dev_card],
+            "dev_card": dev_card,
+            "label": PLAY_DEV_CARD_LABELS[dev_card],
+        }
+    if index < 295:
+        resource = RESOURCES[index - 290]
+        return {
+            "index": index,
+            "kind": "year_of_plenty_select",
+            "resource": resource,
+            "label": f"Take 1 {resource}",
+        }
+    resource = RESOURCES[index - 295]
+    return {
+        "index": index,
+        "kind": "monopoly_select",
+        "resource": resource,
+        "label": f"Take all {resource}",
+    }

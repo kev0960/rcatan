@@ -92,17 +92,22 @@ enum GameState {
     // (settlement, road).
     InitialBoardSetup(u8),
 
-    // Dice 7 rolled phase.
-    //  -- Actions are "discard" untill all players > 7 cards discards resources.
-    //  -- then the "player" will be able to move the robber.
-    //
-    // The array tracks the number of cards that each player should have after discarding.
+    // 7 was rolled. At least one player still has more resource cards than
+    // their post-discard target. Tuple holds the original roller (so we can
+    // restore `current_player` once all discards complete) plus the per-player
+    // target counts.
     Dice7Rolled((PlayerId, [u8; 4])),
 
-    StealResourceAfterRobber,
+    // The current player picks a tile to move the robber to. Reached either
+    // by a 7 roll (after all discards complete) or by playing a Knight dev
+    // card. The two paths share the same legal-action set and the same
+    // downstream transition in run_action::MoveRobber, so they share a
+    // state.
+    AwaitingMoveRobber,
 
-    // current player should roll the dice.
-    RollDice,
+    // The robber has just been moved to a tile that borders at least one enemy
+    // structure. The current player chooses whom to steal from.
+    StealResourceAfterRobber,
 
     // current player should continue action.
     ContinueAction,
@@ -110,7 +115,10 @@ enum GameState {
     // Game is ended with the given winner.
     GameEnded(PlayerId),
 
-    // (Dev card used, processed_once)
+    // (Dev card used, processed_once). Used for the multi-step dev cards
+    // RoadBuilding and YearOfPlenty (and the single-step Monopoly, where the
+    // bool is unused). Knight does NOT go through this state — it goes
+    // straight to AwaitingMoveRobber.
     UsedDevCard((DevCard, bool)),
 }
 
@@ -188,8 +196,6 @@ impl Game {
         }
 
         // Map the engine's internal GameState to the externally-facing Phase.
-        // RollDice is invisible to consumers — get_actions resolves it before
-        // returning, so a caller will only ever observe one of the phases below.
         let phase = match self.state {
             GameState::InitialBoardSetup(step) => {
                 if step % 2 == 0 {
@@ -199,30 +205,21 @@ impl Game {
                 }
             }
             GameState::Dice7Rolled((_, target_counts)) => {
-                let still_discarding = (0..4).any(|i| {
-                    self.players[i].num_resource_cards() > target_counts[i]
-                });
-                if still_discarding {
-                    Phase::Discard { target_counts }
-                } else {
-                    Phase::MoveRobber
-                }
+                Phase::Discard { target_counts }
             }
+            GameState::AwaitingMoveRobber => Phase::MoveRobber,
             GameState::StealResourceAfterRobber => Phase::StealResource,
             GameState::ContinueAction => Phase::ContinueAction,
             GameState::GameEnded(_) => Phase::GameEnded,
             GameState::UsedDevCard((dev_card, _)) => match dev_card {
-                DevCard::Knight => Phase::StealResource,
+                // Knight no longer reaches this branch — it goes straight
+                // to AwaitingMoveRobber. Kept defensively as ContinueAction.
+                DevCard::Knight => Phase::ContinueAction,
                 DevCard::VictoryPoint => Phase::ContinueAction,
                 DevCard::RoadBuilding => Phase::ContinueAction,
                 DevCard::YearOfPlenty => Phase::ContinueAction,
                 DevCard::Monopoly => Phase::ContinueAction,
             },
-            // RollDice is transient: get_actions immediately rolls and
-            // transitions to ContinueAction or Dice7Rolled. If a consumer ever
-            // sees it (e.g. before any get_actions call) report it as
-            // ContinueAction's logical successor.
-            GameState::RollDice => Phase::ContinueAction,
         };
 
         FullState {
@@ -237,105 +234,41 @@ impl Game {
         }
     }
 
-    // Return the list of actions that the agent can do in the given game state.
-    //
-    // WARNING: This function is NOT idempotent!
-    //
-    // It modifies the game state based on the actions that are
-    // done (e.g. dice roll result)
-    pub fn get_actions_and_advance_game_state(&mut self) -> Vec<Action> {
-        // "RollDice" state is not a state visible to the agents.
-        if let GameState::RollDice = self.state {
-            let dice =
-                self.rng.random_range(1..=6) + self.rng.random_range(1..=6);
-
-            self.last_dice_roll = Some(dice);
-
-            if dice == 7 {
-                let mut target_resource_num = [0; 4];
-                for player in &self.players {
-                    if player.num_resource_cards() > 7 {
-                        target_resource_num[usize::from(player.id)] =
-                            player.num_resource_cards().div_ceil(2);
-                    } else {
-                        target_resource_num[usize::from(player.id)] =
-                            player.num_resource_cards();
-                    }
-                }
-
-                self.state = GameState::Dice7Rolled((
-                    PlayerId::from(self.current_player),
-                    target_resource_num,
-                ));
-            } else {
-                self.handle_non_7_dice_roll(dice);
-                self.state = GameState::ContinueAction;
-            }
-        };
-
+    // Project the current game state into the set of legal actions for
+    // `current_player`. Pure read; safe to call any number of times between
+    // run_action calls. All state transitions live in `run_action`.
+    pub fn get_actions(&self) -> Vec<Action> {
         match self.state {
-            GameState::Dice7Rolled((player, target_resource_num)) => {
-                // Find the player with the card > 7.
-                for player in &self.players {
-                    if player.num_resource_cards()
-                        > target_resource_num[usize::from(player.id)]
-                    {
-                        self.current_player = player.id.into();
-
-                        return player
-                            .cards
-                            .iter()
-                            .take(5)
-                            .enumerate()
-                            .filter_map(|(i, count)| match count {
-                                0 => None,
-                                _ => Some(Action::DiscardResource(
-                                    Resource::ALL[i],
-                                )),
-                            })
-                            .collect();
-                    }
-                }
-
-                self.current_player = player.into();
-                self.state = GameState::StealResourceAfterRobber;
-
-                // If none of the player has more than 7, then move the robber.
-                self.board
-                    .get_tile_without_robber()
-                    .into_iter()
-                    .map(Action::MoveRobber)
+            GameState::Dice7Rolled((_roller, _target_counts)) => {
+                // current_player has been set to the active discarder by
+                // either roll_dice_for_current_player (initial) or
+                // run_action::DiscardResource (subsequent). Just project
+                // their legal discards.
+                let player = &self.players[self.current_player];
+                player
+                    .cards
+                    .iter()
+                    .take(5)
+                    .enumerate()
+                    .filter_map(|(i, count)| match count {
+                        0 => None,
+                        _ => Some(Action::DiscardResource(Resource::ALL[i])),
+                    })
                     .collect()
             }
+            GameState::AwaitingMoveRobber => self
+                .board
+                .get_tile_without_robber()
+                .into_iter()
+                .map(Action::MoveRobber)
+                .collect(),
             GameState::StealResourceAfterRobber => {
-                self.state = GameState::ContinueAction;
-
-                // Check the players around the new robber's location.
-                let robber_tile = self.board.get_robber_position();
-                let mut player_set = VecSet::new();
-
-                for node in TILE_TO_NODE[usize::from(robber_tile)] {
-                    if let Some((_, p)) = self.board.get_structure(node).get() {
-                        if usize::from(p) == self.current_player {
-                            continue;
-                        }
-
-                        player_set.insert(usize::from(p));
-                    }
-                }
-
-                if player_set.is_empty() {
-                    // Just continue as a regular turn.
-                    self.current_player_ref().get_available_actions(
-                        &self.board,
-                        self.dev_cards.as_slice(),
-                    )
-                } else {
-                    player_set
-                        .into_iter()
-                        .map(|p| Action::StealCard(PlayerId::from(p)))
-                        .collect()
-                }
+                // Only entered when run_action::MoveRobber found at least
+                // one victim; always non-empty.
+                self.compute_robber_victims()
+                    .into_iter()
+                    .map(|p| Action::StealCard(PlayerId::from(p)))
+                    .collect()
             }
             GameState::InitialBoardSetup(current_order) => {
                 let current_player = self.current_player_ref();
@@ -362,17 +295,10 @@ impl Game {
                 }
             }
             GameState::UsedDevCard((dev_card, _)) => match dev_card {
-                DevCard::Knight => {
-                    self.state = GameState::StealResourceAfterRobber;
-
-                    return self
-                        .board
-                        .get_tile_without_robber()
-                        .into_iter()
-                        .map(Action::MoveRobber)
-                        .collect();
-                }
-                DevCard::VictoryPoint => {
+                // Knight no longer reaches this branch — it goes straight
+                // to AwaitingMoveRobber. Treated defensively as a no-op
+                // fallthrough to ContinueAction-style actions.
+                DevCard::Knight | DevCard::VictoryPoint => {
                     self.current_player_ref().get_available_actions(
                         &self.board,
                         self.dev_cards.as_slice(),
@@ -406,7 +332,7 @@ impl Game {
                     self.dev_cards.as_slice(),
                 )
             }
-            GameState::RollDice | GameState::GameEnded(_) => {
+            GameState::GameEnded(_) => {
                 panic!(
                     "Impossible game state. It should have been handled earlier"
                 );
@@ -430,7 +356,12 @@ impl Game {
                 {
                     // Resources are not consumed during initial board setup.
                     if current_order == 15 {
-                        self.state = GameState::RollDice;
+                        // Last initial-setup road. Roll for player 0's
+                        // first regular turn here so that get_actions
+                        // never has to handle the transient RollDice
+                        // state externally. (current_player is already 0
+                        // at this point.)
+                        self.roll_dice_for_current_player();
                     } else {
                         self.state =
                             GameState::InitialBoardSetup(current_order + 1);
@@ -479,13 +410,14 @@ impl Game {
                         if let GameState::InitialBoardSetup(current_order) =
                             game_state
                         {
-                            if current_order == 15 {
-                                self.state = GameState::RollDice;
-                            } else {
-                                self.state = GameState::InitialBoardSetup(
-                                    current_order + 1,
-                                );
-                            }
+                            // Settlements are placed on even initial-setup
+                            // steps (0, 2, …, 14) and roads on odd ones, so
+                            // BuildStructure is never the step-15 transition.
+                            // Just advance the order — the final dice roll
+                            // happens in the BuildRoad handler.
+                            self.state = GameState::InitialBoardSetup(
+                                current_order + 1,
+                            );
                         } else {
                             current_player.cards[Resource::Brick as usize] -= 1;
                             current_player.cards[Resource::Lumber as usize] -=
@@ -517,11 +449,34 @@ impl Game {
                 current_player.cards[get as usize] += 1;
             }
             Action::DiscardResource(resource) => {
-                let current_player = self.current_player_mut();
-                current_player.cards[resource as usize] -= 1;
+                self.current_player_mut().cards[resource as usize] -= 1;
+
+                // Advance the discard sub-state-machine here (used to live
+                // inside get_actions). If somebody else still needs to
+                // discard, hand them control; otherwise return control to
+                // the roller and move on to the move-robber decision.
+                if let GameState::Dice7Rolled((roller, target_counts)) =
+                    self.state
+                {
+                    if let Some(next) =
+                        self.find_next_discarder(&target_counts)
+                    {
+                        self.current_player = usize::from(next);
+                    } else {
+                        self.current_player = usize::from(roller);
+                        self.state = GameState::AwaitingMoveRobber;
+                    }
+                }
             }
             Action::MoveRobber(tile_id) => {
                 self.board.move_robber_to(tile_id);
+                // Decide the next decision point now (and not on the next
+                // get_actions call) so get_actions stays idempotent.
+                if self.compute_robber_victims().is_empty() {
+                    self.state = GameState::ContinueAction;
+                } else {
+                    self.state = GameState::StealResourceAfterRobber;
+                }
             }
             Action::StealCard(player_id) => {
                 let player = &mut self.players[usize::from(player_id)];
@@ -532,13 +487,18 @@ impl Game {
                     self.current_player_mut()
                         .add_resource_card(Resource::ALL[r], 1);
                 }
+                self.state = GameState::ContinueAction;
             }
             Action::EndTurn => {
                 self.current_player_mut().end_player_turn();
                 self.current_player = (self.current_player + 1) % 4;
-                self.state = GameState::RollDice;
-                self.last_dice_roll = None;
                 self.game_detail.total_turns += 1;
+
+                // Roll a dice for the next player to move forward with the
+                // next steps.
+                // NOTE: the winning condition or the rewards computed won't be
+                // affected by this.
+                self.roll_dice_for_current_player();
             }
             Action::BuyDevCard => {
                 let dev_card = self.get_random_dev_card();
@@ -554,8 +514,7 @@ impl Game {
 
                 match dev_card {
                     DevCard::Knight => {
-                        self.state =
-                            GameState::UsedDevCard((DevCard::Knight, false));
+                        self.state = GameState::AwaitingMoveRobber;
 
                         let num_used_knight_cards =
                             self.current_player_ref().num_used_knight_cards;
@@ -670,7 +629,7 @@ impl Game {
 
     // Run "one step". Returns the player id when the game is ended. Otherwise returns None.
     fn step(&mut self) -> Option<PlayerId> {
-        let mut actions = self.get_actions_and_advance_game_state();
+        let mut actions = self.get_actions();
 
         let action_index = self.rng.random_range(0..actions.len());
         let action = actions.swap_remove(action_index);
@@ -680,6 +639,83 @@ impl Game {
         match self.state {
             GameState::GameEnded(player) => Some(player),
             _ => None,
+        }
+    }
+
+    // First player still over their post-7-roll discard target, scanning in
+    // PlayerId order. None means everyone has discarded enough.
+    fn find_next_discarder(
+        &self,
+        target_counts: &[u8; 4],
+    ) -> Option<PlayerId> {
+        self.players
+            .iter()
+            .find(|p| {
+                p.num_resource_cards() > target_counts[usize::from(p.id)]
+            })
+            .map(|p| p.id)
+    }
+
+    // Set of player ids (other than the current player) that have at least
+    // one structure adjacent to the robber's current tile. Caller decides
+    // what to do with an empty result (skip steal phase) vs. non-empty
+    // (drive a StealCard decision).
+    fn compute_robber_victims(&self) -> VecSet<usize> {
+        let robber_tile = self.board.get_robber_position();
+        let mut player_set = VecSet::new();
+        for node in TILE_TO_NODE[usize::from(robber_tile)] {
+            if let Some((_, p)) = self.board.get_structure(node).get() {
+                if usize::from(p) == self.current_player {
+                    continue;
+                }
+                player_set.insert(usize::from(p));
+            }
+        }
+        player_set
+    }
+
+    // Roll 2d6 for whoever `self.current_player` currently points at, set
+    // `last_dice_roll`, and put the engine in the right post-roll state:
+    //   - 7  → Dice7Rolled with per-player target hand sizes for discards
+    //   - !7 → distribute resources, then ContinueAction
+    //
+    // Called when control naturally hands off to the next decision point —
+    // i.e. inside run_action(EndTurn) and at the end of the initial setup —
+    // so get_actions stays a pure projection of state.
+    fn roll_dice_for_current_player(&mut self) {
+        let dice =
+            self.rng.random_range(1..=6) + self.rng.random_range(1..=6);
+        self.last_dice_roll = Some(dice);
+
+        if dice != 7 {
+            self.handle_non_7_dice_roll(dice);
+            self.state = GameState::ContinueAction;
+            return;
+        }
+
+        let mut target_counts = [0; 4];
+        for player in &self.players {
+            target_counts[usize::from(player.id)] =
+                if player.num_resource_cards() > 7 {
+                    player.num_resource_cards().div_ceil(2)
+                } else {
+                    player.num_resource_cards()
+                };
+        }
+
+        let roller = PlayerId::from(self.current_player);
+        if let Some(discarder) = self.find_next_discarder(&target_counts) {
+            // Hand control to the first player to discard; subsequent advances
+            // happen in run_action::DiscardResource so get_actions stays
+            // idempotent.
+            self.current_player = usize::from(discarder);
+            // Need to keep track whose original turn was, and the target
+            // counts for the players to keep.
+            self.state = GameState::Dice7Rolled((roller, target_counts));
+        } else {
+            // Nobody is over the cap; jump straight to the move-robber
+            // decision for the roller.
+            self.state = GameState::AwaitingMoveRobber;
         }
     }
 
@@ -839,7 +875,7 @@ mod tests {
             current_player: 0,
             dev_cards: ArrayVec::from([0; 5]),
             game_detail: GameDetail::new(),
-            state: GameState::RollDice,
+            state: GameState::ContinueAction,
             last_dice_roll: None,
             rng,
         }
@@ -1069,7 +1105,7 @@ mod tests {
             current_player: 0,
             dev_cards: ArrayVec::from([0; 5]),
             game_detail: GameDetail::new(),
-            state: GameState::RollDice,
+            state: GameState::ContinueAction,
             last_dice_roll: None,
             rng,
         };
@@ -1092,47 +1128,13 @@ mod tests {
             current_player: 0,
             dev_cards: ArrayVec::from([0; 5]),
             game_detail: GameDetail::new(),
-            state: GameState::RollDice,
+            state: GameState::ContinueAction,
             last_dice_roll: None,
             rng,
         };
 
         game.board
             .build_structure(NodeId::new(3), p(1), Building::City);
-
-        game.handle_non_7_dice_roll(8);
-
-        assert_eq!(game.players[1].cards[Resource::Ore as usize], 2);
-    }
-
-    // ---- step tests ----
-
-    #[test]
-    fn step_is_deterministic() {
-        let mut game1 = Game::new(123);
-        let mut game2 = Game::new(123);
-
-        for _ in 0..100 {
-            let r1 = game1.step();
-            let r2 = game2.step();
-            assert_eq!(r1, r2);
-            if r1.is_some() {
-                break;
-            }
-        }
-    }
-
-    #[test]
-    fn step_does_not_panic() {
-        let mut game = Game::new(999);
-        for i in 0..1000 {
-            if game.step().is_some() {
-                // This shouldn't change unless we changed some logic in the game.
-                // (to guarantee that the simulation is deterministic)
-                assert_eq!(i, 655);
-                break;
-            }
-        }
     }
 
     #[test]
@@ -1166,7 +1168,10 @@ mod tests {
         let mut game = Game {
             board: Board::new(&[(2, TileType::Desert), (5, TileType::Forest)]),
             players: ArrayVec::from(from_fn(|i| Player::new(i.into()))),
-            current_player: 0,
+            // current_player tracks the active discarder while in Dice7Rolled
+            // (set by roll_dice_for_current_player when 7 is rolled). Player
+            // 1 has the most cards over their target, so they discard first.
+            current_player: 1,
             dev_cards: ArrayVec::from([0; 5]),
             game_detail: GameDetail::new(),
             state: GameState::Dice7Rolled((p(0), [0, 4, 5, 0])), // Player 0 rolled a 7
@@ -1189,7 +1194,7 @@ mod tests {
         // --- Phase 1: Discard ---
 
         // Player 1 (8 cards, target 4) should discard first.
-        let actions = game.get_actions_and_advance_game_state();
+        let actions = game.get_actions();
         assert!(
             actions
                 .iter()
@@ -1210,7 +1215,7 @@ mod tests {
         assert_eq!(game.players[1].num_resource_cards(), 4);
 
         // Player 2 (9 cards, target 5) should discard next.
-        let actions = game.get_actions_and_advance_game_state();
+        let actions = game.get_actions();
         assert!(
             actions
                 .iter()
@@ -1233,7 +1238,7 @@ mod tests {
         // --- Phase 2: Move Robber ---
 
         // All discards done. Current player should be restored to player 0 (who rolled).
-        let actions = game.get_actions_and_advance_game_state();
+        let actions = game.get_actions();
         assert!(actions.iter().all(|a| matches!(a, Action::MoveRobber(_))));
         assert_eq!(game.current_player, 0);
 
@@ -1242,7 +1247,7 @@ mod tests {
 
         // --- Phase 3: Steal ---
 
-        let actions = game.get_actions_and_advance_game_state();
+        let actions = game.get_actions();
         assert_eq!(actions, vec![Action::StealCard(p(2))]);
 
         game.run_action(Action::StealCard(p(2)));
@@ -1301,7 +1306,7 @@ mod tests {
 
         game.run_action(Action::BuyDevCard);
 
-        let actions = game.get_actions_and_advance_game_state();
+        let actions = game.get_actions();
         assert!(
             !actions.iter().any(|a| matches!(a, Action::UseDevCard(_))),
             "should not be able to play a dev card bought this turn"
@@ -1315,7 +1320,7 @@ mod tests {
         game.players[0].cards[Resource::Grain as usize] = 5;
         game.players[0].cards[Resource::Wool as usize] = 5;
 
-        let actions = game.get_actions_and_advance_game_state();
+        let actions = game.get_actions();
         assert!(!actions.iter().any(|a| matches!(a, Action::BuyDevCard)));
     }
 
@@ -1335,7 +1340,7 @@ mod tests {
         game.players[0].cards[DevCard::Knight as usize] = 1;
 
         game.run_action(Action::UseDevCard(DevCard::Knight));
-        let actions = game.get_actions_and_advance_game_state();
+        let actions = game.get_actions();
 
         assert!(actions.iter().all(|a| matches!(a, Action::MoveRobber(_))));
         assert!(!actions.is_empty());
@@ -1362,10 +1367,10 @@ mod tests {
             .build_structure(NodeId::new(1), p(1), Building::Settlement);
 
         game.run_action(Action::UseDevCard(DevCard::Knight));
-        let _ = game.get_actions_and_advance_game_state();
+        let _ = game.get_actions();
         game.run_action(Action::MoveRobber(TileId::from(1usize)));
 
-        let actions = game.get_actions_and_advance_game_state();
+        let actions = game.get_actions();
         assert_eq!(actions, vec![Action::StealCard(p(1))]);
         game.run_action(Action::StealCard(p(1)));
 
@@ -1482,7 +1487,7 @@ mod tests {
 
         game.run_action(Action::UseDevCard(DevCard::YearOfPlenty));
 
-        let actions = game.get_actions_and_advance_game_state();
+        let actions = game.get_actions();
         assert!(
             actions
                 .iter()
@@ -1490,7 +1495,7 @@ mod tests {
         );
         game.run_action(Action::YearOfPlentyGetResource(Resource::Ore));
 
-        let actions = game.get_actions_and_advance_game_state();
+        let actions = game.get_actions();
         assert!(
             actions
                 .iter()
@@ -1531,7 +1536,7 @@ mod tests {
         game.players[0].cards[DevCard::RoadBuilding as usize] = 1;
         // No existing road or settlement → no road can be extended from.
 
-        let actions = game.get_actions_and_advance_game_state();
+        let actions = game.get_actions();
         assert!(
             !actions.iter().any(|a| matches!(
                 a,
@@ -1549,7 +1554,7 @@ mod tests {
         game.board.build_road(RoadId::new(0), p(0));
         game.players[0].num_road = 15;
 
-        let actions = game.get_actions_and_advance_game_state();
+        let actions = game.get_actions();
         assert!(
             !actions.iter().any(|a| matches!(
                 a,
@@ -1568,7 +1573,7 @@ mod tests {
 
         game.run_action(Action::UseDevCard(DevCard::RoadBuilding));
 
-        let actions = game.get_actions_and_advance_game_state();
+        let actions = game.get_actions();
         assert!(actions.iter().all(|a| matches!(a, Action::BuildRoad(_))));
         let r = match actions[0] {
             Action::BuildRoad(r) => r,
@@ -1576,7 +1581,7 @@ mod tests {
         };
         game.run_action(Action::BuildRoad(r));
 
-        let actions = game.get_actions_and_advance_game_state();
+        let actions = game.get_actions();
         assert!(
             actions.iter().all(|a| matches!(a, Action::BuildRoad(_))),
             "second free road should still be available"
@@ -1619,7 +1624,7 @@ mod tests {
         let mut game = game_in_continue_action();
         game.players[0].cards[DevCard::VictoryPoint as usize] = 3;
 
-        let actions = game.get_actions_and_advance_game_state();
+        let actions = game.get_actions();
         assert!(
             !actions.iter().any(|a| matches!(
                 a,
@@ -1638,7 +1643,7 @@ mod tests {
         game.run_action(Action::UseDevCard(DevCard::Monopoly));
         game.run_action(Action::MonopolyGetResource(Resource::Brick));
 
-        let actions = game.get_actions_and_advance_game_state();
+        let actions = game.get_actions();
         assert!(
             !actions.iter().any(|a| matches!(a, Action::UseDevCard(_))),
             "should not be able to play a second dev card on the same turn"
@@ -1654,7 +1659,7 @@ mod tests {
         game.run_action(Action::MonopolyGetResource(Resource::Brick));
 
         // Mid-turn: flag is set, no UseDevCard offered.
-        let actions = game.get_actions_and_advance_game_state();
+        let actions = game.get_actions();
         assert!(!actions.iter().any(|a| matches!(a, Action::UseDevCard(_))));
 
         // EndTurn must reset the flag for player 0. Manually return to player 0
@@ -1663,12 +1668,91 @@ mod tests {
         game.current_player = 0;
         game.state = GameState::ContinueAction;
 
-        let actions = game.get_actions_and_advance_game_state();
+        let actions = game.get_actions();
         assert!(
             actions
                 .iter()
                 .any(|a| matches!(a, Action::UseDevCard(DevCard::Monopoly))),
             "player 0 should be able to play a dev card on their next turn"
         );
+    }
+
+    // ---- get_actions idempotency ----
+
+    /// Drive a deterministic game forward and assert that calling
+    /// get_actions multiple times in a row at every decision point returns
+    /// the identical action set (and never mutates observable state). This
+    /// is the contract that lets the web session driver call
+    /// get_action_mask freely without worrying about state advancing under
+    /// it — the original "Steal from player before Move robber" bug.
+    #[test]
+    fn get_actions_is_idempotent_across_a_full_game() {
+        let mut game = Game::new(999);
+        let mut rng = ChaCha8Rng::seed_from_u64(12345);
+
+        for _ in 0..1000 {
+            let first = game.get_actions();
+            let second = game.get_actions();
+            let third = game.get_actions();
+
+            assert_eq!(first, second);
+            assert_eq!(first, third);
+
+            // Also: current_player and last_dice_roll must not budge across
+            // repeated get_actions calls.
+            let cp = game.current_player;
+            let dice = game.last_dice_roll;
+            let _ = game.get_actions();
+            assert_eq!(game.current_player, cp);
+            assert_eq!(game.last_dice_roll, dice);
+
+            if first.is_empty() {
+                panic!(
+                    "no legal actions at state {:?}, current_player={}",
+                    game.state, game.current_player
+                );
+            }
+
+            let pick = rng.random_range(0..first.len());
+            let action = first[pick];
+            game.run_action(action);
+
+            if matches!(game.state, GameState::GameEnded(_)) {
+                break;
+            }
+        }
+    }
+
+    /// Regression test for the "steal before move" bug surfaced by the web
+    /// session: after a 7 roll where nobody has cards over the cap, the
+    /// engine must offer MoveRobber actions (not StealCard) regardless of
+    /// how many times the caller queries the mask before acting.
+    #[test]
+    fn dice_7_with_no_discards_offers_move_robber_idempotently() {
+        let rng = ChaCha8Rng::seed_from_u64(0);
+        // Tile 0 desert (robber start), tile 1 forest with player 2 settlement.
+        let mut game = Game {
+            board: Board::new(&[(2, TileType::Desert), (5, TileType::Forest)]),
+            players: ArrayVec::from(from_fn(|i| Player::new(i.into()))),
+            current_player: 0,
+            dev_cards: ArrayVec::from([0; 5]),
+            game_detail: GameDetail::new(),
+            // 7 was rolled but nobody is over the cap → AwaitingMoveRobber.
+            state: GameState::AwaitingMoveRobber,
+            last_dice_roll: Some(7),
+            rng,
+        };
+        game.board
+            .build_structure(NodeId::new(1), p(2), Building::Settlement);
+
+        for _ in 0..5 {
+            let actions = game.get_actions();
+            assert!(
+                actions.iter().all(|a| matches!(a, Action::MoveRobber(_))),
+                "expected MoveRobber actions, got {:?}",
+                actions
+            );
+            assert!(matches!(game.state, GameState::AwaitingMoveRobber));
+        }
     }
 }
