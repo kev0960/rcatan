@@ -304,26 +304,20 @@ impl Game {
                         self.dev_cards.as_slice(),
                     )
                 }
-                DevCard::RoadBuilding => {
-                    return self
-                        .current_player_ref()
-                        .get_available_roads(&self.board)
-                        .into_iter()
-                        .map(Action::BuildRoad)
-                        .collect();
-                }
-                DevCard::YearOfPlenty => {
-                    return Resource::ALL
-                        .iter()
-                        .map(|r| Action::YearOfPlentyGetResource(*r))
-                        .collect();
-                }
-                DevCard::Monopoly => {
-                    return Resource::ALL
-                        .iter()
-                        .map(|r| Action::MonopolyGetResource(*r))
-                        .collect();
-                }
+                DevCard::RoadBuilding => self
+                    .current_player_ref()
+                    .get_available_roads(&self.board)
+                    .into_iter()
+                    .map(Action::BuildRoad)
+                    .collect(),
+                DevCard::YearOfPlenty => Resource::ALL
+                    .iter()
+                    .map(|r| Action::YearOfPlentyGetResource(*r))
+                    .collect(),
+                DevCard::Monopoly => Resource::ALL
+                    .iter()
+                    .map(|r| Action::MonopolyGetResource(*r))
+                    .collect(),
             },
             GameState::ContinueAction => {
                 let current_player = self.current_player_ref();
@@ -379,10 +373,9 @@ impl Game {
                         // Only continue RoadBuilding if the player can build
                         // another road.
                         if current_player_ref.num_road < 15
-                            && current_player_ref
+                            && !current_player_ref
                                 .get_available_roads(&self.board)
-                                .len()
-                                > 0
+                                .is_empty()
                         {
                             self.state = GameState::UsedDevCard((
                                 DevCard::RoadBuilding,
@@ -402,23 +395,34 @@ impl Game {
             Action::BuildStructure(building, node_id) => {
                 let game_state = self.state;
 
-                let current_player = self.current_player_mut();
                 match building {
                     Building::Settlement => {
-                        current_player.num_settlement += 1;
+                        self.current_player_mut().num_settlement += 1;
 
                         if let GameState::InitialBoardSetup(current_order) =
                             game_state
                         {
+                            if current_order >= 8 {
+                                // Get resources adjacent to the node id.
+                                let init_resources = self
+                                    .board
+                                    .get_resources_near_node_id(node_id);
+
+                                let current_player = self.current_player_mut();
+                                init_resources.into_iter().for_each(|r| {
+                                    current_player.add_resource_card(r, 1);
+                                });
+                            }
+
                             // Settlements are placed on even initial-setup
                             // steps (0, 2, …, 14) and roads on odd ones, so
                             // BuildStructure is never the step-15 transition.
                             // Just advance the order — the final dice roll
                             // happens in the BuildRoad handler.
-                            self.state = GameState::InitialBoardSetup(
-                                current_order + 1,
-                            );
+                            self.state =
+                                GameState::InitialBoardSetup(current_order + 1);
                         } else {
+                            let current_player = self.current_player_mut();
                             current_player.cards[Resource::Brick as usize] -= 1;
                             current_player.cards[Resource::Lumber as usize] -=
                                 1;
@@ -427,6 +431,7 @@ impl Game {
                         }
                     }
                     Building::City => {
+                        let current_player = self.current_player_mut();
                         current_player.num_city += 1;
                         current_player.num_settlement -= 1;
 
@@ -458,8 +463,7 @@ impl Game {
                 if let GameState::Dice7Rolled((roller, target_counts)) =
                     self.state
                 {
-                    if let Some(next) =
-                        self.find_next_discarder(&target_counts)
+                    if let Some(next) = self.find_next_discarder(&target_counts)
                     {
                         self.current_player = usize::from(next);
                     } else {
@@ -644,15 +648,10 @@ impl Game {
 
     // First player still over their post-7-roll discard target, scanning in
     // PlayerId order. None means everyone has discarded enough.
-    fn find_next_discarder(
-        &self,
-        target_counts: &[u8; 4],
-    ) -> Option<PlayerId> {
+    fn find_next_discarder(&self, target_counts: &[u8; 4]) -> Option<PlayerId> {
         self.players
             .iter()
-            .find(|p| {
-                p.num_resource_cards() > target_counts[usize::from(p.id)]
-            })
+            .find(|p| p.num_resource_cards() > target_counts[usize::from(p.id)])
             .map(|p| p.id)
     }
 
@@ -683,8 +682,7 @@ impl Game {
     // i.e. inside run_action(EndTurn) and at the end of the initial setup —
     // so get_actions stays a pure projection of state.
     fn roll_dice_for_current_player(&mut self) {
-        let dice =
-            self.rng.random_range(1..=6) + self.rng.random_range(1..=6);
+        let dice = self.rng.random_range(1..=6) + self.rng.random_range(1..=6);
         self.last_dice_roll = Some(dice);
 
         if dice != 7 {
@@ -1045,6 +1043,43 @@ mod tests {
 
         assert_eq!(game.players[0].cards[Resource::Wool as usize], 0);
         assert_eq!(game.players[0].cards[Resource::Ore as usize], 1);
+    }
+
+    // ---- Initial board setup tests ----
+
+    #[test]
+    fn second_initial_settlement_grants_adjacent_resources() {
+        // Use a full random board; the second-round settlement should yield
+        // exactly the resources of the tiles adjacent to its node.
+        let mut game = Game::new(42);
+        // Step 14 → player 0's second (final) initial settlement.
+        // Resources are only granted on the second-round placement
+        // (current_order >= 8).
+        game.state = GameState::InitialBoardSetup(14);
+        game.current_player = 0;
+
+        // Pick any node and ask the board what resources it borders, so the
+        // assertion stays independent of the specific board layout.
+        let node = NodeId::new(8);
+        let mut expected = [0u8; 5];
+        for r in game.board.get_resources_near_node_id(node) {
+            expected[r as usize] += 1;
+        }
+
+        // First settlement (step 0–7) for sanity: must NOT grant resources.
+        let mut sanity = Game::new(42);
+        sanity.state = GameState::InitialBoardSetup(0);
+        sanity.run_action(Action::BuildStructure(
+            Building::Settlement,
+            NodeId::new(0),
+        ));
+        assert_eq!(sanity.players[0].cards[..5], [0u8; 5]);
+
+        game.run_action(Action::BuildStructure(Building::Settlement, node));
+
+        assert_eq!(game.players[0].cards[..5], expected);
+        assert_eq!(game.players[0].num_settlement, 1);
+        assert!(matches!(game.state, GameState::InitialBoardSetup(15)));
     }
 
     // ---- Victory point tests ----
