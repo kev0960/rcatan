@@ -1,0 +1,203 @@
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #f4f5f7;
+  color: #222;
+}
+
+.app { padding: 16px; max-width: 1400px; margin: 0 auto; }
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+header h1 { margin: 0; font-size: 22px; }
+
+.controls { display: flex; gap: 6px; flex-wrap: wrap; }
+.controls button {
+  padding: 6px 10px;
+  border: 1px solid #cfd6e0;
+  background: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.controls button:hover:not(:disabled) { background: #eef2f7; }
+.controls button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.error {
+  background: #ffe6e6;
+  border: 1px solid #f0a0a0;
+  color: #7a1818;
+  padding: 8px 12px;
+  border-radius: 4px;
+  margin-bottom: 12px;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 16px;
+  align-items: start;
+}
+
+.board-wrap { display: flex; flex-direction: column; gap: 8px; }
+.status {
+  font-size: 14px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.your-turn { color: #1a7f37; font-weight: 600; }
+.finished { color: #5e3aaf; font-weight: 600; }
+
+.dice {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #fff;
+  border: 1px solid #cfd6e0;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 18px;
+  font-weight: 700;
+  color: #222;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+}
+.dice.seven {
+  background: #fde9e9;
+  border-color: #d4a3a3;
+  color: #b03030;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  font-size: 13px;
+}
+.sidebar h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6a7280;
+}
+
+.players { display: flex; flex-direction: column; gap: 6px; }
+.player {
+  background: #fff;
+  border: 1px solid #e0e3e8;
+  border-radius: 4px;
+  padding: 8px 10px;
+}
+.player.current { background: #fff7d6; }
+.player-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.player-header .vp { margin-left: auto; font-weight: 600; }
+.badge {
+  background: #eef2f7;
+  border: 1px solid #cfd6e0;
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 11px;
+  color: #4a5568;
+}
+.badge.current-badge {
+  background: #fde9a9;
+  border-color: #d4ad3a;
+  color: #6a4f00;
+}
+.cards {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 13px;
+  color: #444;
+}
+
+.ai-panel, .ai-log, .action-list {
+  background: #fff;
+  border: 1px solid #e0e3e8;
+  border-radius: 4px;
+  padding: 10px;
+}
+.ai-panel ol { padding-left: 18px; margin: 0; }
+.ai-panel li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+}
+.rank {
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: 11px;
+  color: #fff;
+}
+.rank-0 { background: #f1c40f; color: #555; }
+.rank-1 { background: #f39c12; }
+.rank-2 { background: #e67e22; }
+.logit {
+  margin-left: auto;
+  font-family: monospace;
+  font-size: 11px;
+  color: #777;
+}
+.hint { color: #888; font-size: 11px; margin: 6px 0 0; }
+
+.action-list { display: flex; flex-direction: column; gap: 4px; }
+.action-list button {
+  text-align: left;
+  padding: 6px 8px;
+  border: 1px solid #cfd6e0;
+  background: #fafbfd;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.action-list button:hover { background: #eef2f7; }
+.action-summary {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: #4a5568;
+  background: #f4f6fa;
+  border-radius: 4px;
+}
+.action-summary .count { color: #6a7280; font-style: italic; }
+.action-group { display: flex; flex-direction: column; gap: 3px; }
+.action-group-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6a7280;
+  margin-top: 4px;
+}
+
+.ai-log ul { list-style: none; padding: 0; margin: 0; }
+.ai-log li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
+}
+.ai-log .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}

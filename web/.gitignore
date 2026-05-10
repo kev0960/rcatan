@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.log
+.vite/
+
+# Compiled output should never live next to TS sources.
+src/**/*.js
+src/**/*.jsx
+src/**/*.mjs
+src/**/*.cjs
