@@ -49,11 +49,11 @@ impl DevCard {
     ];
 
     pub fn from_u8(u: u8) -> Self {
-        return DevCard::ALL[u as usize - 5];
+        DevCard::ALL[u as usize - 5]
     }
 
     pub fn from_array_index(idx: usize) -> Self {
-        return DevCard::ALL[idx];
+        DevCard::ALL[idx]
     }
 }
 

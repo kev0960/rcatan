@@ -7,6 +7,7 @@ import {
   PLAYER_COLORS,
   RESOURCE_COLORS,
   nodePositions,
+  portPositions,
   roadPositions,
   tilePositions,
 } from "./layout";
@@ -92,6 +93,7 @@ export function Board({
   const tiles = useMemo(() => tilePositions(), []);
   const nodes = useMemo(() => nodePositions(), []);
   const roads = useMemo(() => roadPositions(), []);
+  const ports = useMemo(() => portPositions(), []);
 
   const clickable = useMemo(
     () => buildClickable(legalActions, isHumanTurn),
@@ -190,14 +192,53 @@ export function Board({
                 strokeWidth={1.5}
               />
             )}
+          </g>
+        );
+      })}
+
+      {/* Ports */}
+      {ports.map((p, i) => {
+        const isAny = p.kind === "any";
+        const fill = isAny ? "#ecf0f1" : RESOURCE_COLORS[p.kind];
+        const darkText =
+          p.kind === "grain" || p.kind === "wool" || p.kind === "any";
+        return (
+          <g key={`port-${i}`} pointerEvents="none">
+            <line
+              x1={p.ax}
+              y1={p.ay}
+              x2={p.cx}
+              y2={p.cy}
+              stroke="#8b6f47"
+              strokeWidth={2}
+              strokeLinecap="round"
+            />
+            <line
+              x1={p.bx}
+              y1={p.by}
+              x2={p.cx}
+              y2={p.cy}
+              stroke="#8b6f47"
+              strokeWidth={2}
+              strokeLinecap="round"
+            />
+            <circle
+              cx={p.cx}
+              cy={p.cy}
+              r={13}
+              fill={fill}
+              stroke="#fff"
+              strokeWidth={2}
+            />
             <text
-              x={t.cx}
-              y={t.cy + HEX_RADIUS * 0.85}
+              x={p.cx}
+              y={p.cy + 4}
               textAnchor="middle"
-              fontSize={10}
-              fill="rgba(255,255,255,0.5)"
+              fontSize={11}
+              fontWeight="bold"
+              fill={darkText ? "#222" : "#fff"}
             >
-              t{t.tileId.toString().padStart(2, "0")}
+              {isAny ? "3:1" : "2:1"}
             </text>
           </g>
         );
@@ -339,6 +380,21 @@ export function Board({
           />
         );
       })}
+
+      {/* Node id labels (debug annotation, matches engine game_viewer.rs) */}
+      {nodes.map((n) => (
+        <text
+          key={`node-label-${n.nodeId}`}
+          x={n.x + 8}
+          y={n.y - 6}
+          textAnchor="start"
+          fontSize={9}
+          fill="rgba(255,255,255,0.55)"
+          pointerEvents="none"
+        >
+          {n.nodeId.toString().padStart(2, "0")}
+        </text>
+      ))}
     </svg>
   );
 }

@@ -96,8 +96,11 @@ function tileCenter(tileId: number): { x: number; y: number } {
   // Tile spans engine (sc..sc+2, sr..sr+2). Center at (sc+1, sr+1).
   const ec = sc + 1;
   const er = sr + 1;
+  // Tile centers occupy engine cols 2..10, so corners span cols 1..11.
+  // Subtract the empty leftmost column so the content sits centered in the
+  // canvas (otherwise it skews right and clips the right-side ports).
   return {
-    x: MARGIN + ec * STEP_X,
+    x: MARGIN + (ec - 1) * STEP_X,
     // Flip y: high engine_row -> low svg y (top of screen)
     y: MARGIN + (MAX_ROW - er) * STEP_Y,
   };
@@ -216,3 +219,62 @@ export const RESOURCE_COLORS: Record<string, string> = {
   wool: "#abebc6",
   desert: "#d7c39d",
 };
+
+// Ports — mirrors `NODE_TO_PORTS` in `crates/engine/src/player.rs`.
+// Each port sits on a coastal edge shared by two nodes: identified by
+// (tileId, edgeIdx) so we can derive geometry from the tile center.
+export type PortKind = "brick" | "lumber" | "ore" | "grain" | "wool" | "any";
+
+export interface PortInfo {
+  kind: PortKind;
+  tileId: number;
+  edgeIdx: number; // index into EDGE_ENDS
+  nodeIds: [number, number];
+}
+
+export const PORTS: PortInfo[] = [
+  { kind: "any", tileId: 0, edgeIdx: 0, nodeIds: [3, 0] },
+  { kind: "any", tileId: 1, edgeIdx: 1, nodeIds: [1, 5] },
+  { kind: "any", tileId: 11, edgeIdx: 3, nodeIds: [26, 32] },
+  { kind: "any", tileId: 16, edgeIdx: 4, nodeIds: [47, 51] },
+  { kind: "brick", tileId: 3, edgeIdx: 2, nodeIds: [11, 16] },
+  { kind: "lumber", tileId: 12, edgeIdx: 2, nodeIds: [33, 38] },
+  { kind: "ore", tileId: 15, edgeIdx: 5, nodeIds: [42, 46] },
+  { kind: "wool", tileId: 6, edgeIdx: 1, nodeIds: [10, 15] },
+  { kind: "grain", tileId: 17, edgeIdx: 5, nodeIds: [52, 49] },
+];
+
+export interface PortPos {
+  kind: PortKind;
+  cx: number; // port marker center
+  cy: number;
+  // Coastal node positions (dock endpoints).
+  ax: number;
+  ay: number;
+  bx: number;
+  by: number;
+}
+
+const PORT_OUTWARD_OFFSET = 30;
+
+export function portPositions(): PortPos[] {
+  return PORTS.map((p) => {
+    const c = tileCenter(p.tileId);
+    const [a, b] = EDGE_ENDS[p.edgeIdx];
+    const oa = CORNER_OFFSETS[a];
+    const ob = CORNER_OFFSETS[b];
+    const ax = c.x + oa.dx;
+    const ay = c.y + oa.dy;
+    const bx = c.x + ob.dx;
+    const by = c.y + ob.dy;
+    const mx = (ax + bx) / 2;
+    const my = (ay + by) / 2;
+    // Outward direction from tile center through edge midpoint.
+    const dx = mx - c.x;
+    const dy = my - c.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const cx = mx + (dx / len) * PORT_OUTWARD_OFFSET;
+    const cy = my + (dy / len) * PORT_OUTWARD_OFFSET;
+    return { kind: p.kind, cx, cy, ax, ay, bx, by };
+  });
+}

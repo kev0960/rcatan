@@ -44,7 +44,7 @@ fn build_node_to_ports_table() -> [Option<Port>; 54] {
         };
     }
 
-    node_to_ports.try_into().unwrap()
+    node_to_ports
 }
 
 pub struct Player {
@@ -828,7 +828,7 @@ mod tests {
         assert_eq!(nodes.len(), 54 - 6);
     }
 
-    // ---- get_available_roads_for_inital_board_setup tests ----
+    // ---- get_available_roads_for_initial_board_setup tests ----
 
     #[test]
     fn initial_road_setup_returns_roads_around_settlement() {

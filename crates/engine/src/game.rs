@@ -611,6 +611,7 @@ impl Game {
         self.compute_rewards(should_recompute_vp)
     }
 
+    #[allow(dead_code)]
     pub fn get_game_state_for_debug(&self) -> String {
         let mut debug_info = String::new();
         debug_info.push_str(&format!(
@@ -629,21 +630,6 @@ impl Game {
         debug_info.push_str(&render_board(&self.board));
 
         debug_info
-    }
-
-    // Run "one step". Returns the player id when the game is ended. Otherwise returns None.
-    fn step(&mut self) -> Option<PlayerId> {
-        let mut actions = self.get_actions();
-
-        let action_index = self.rng.random_range(0..actions.len());
-        let action = actions.swap_remove(action_index);
-
-        self.run_action(action);
-
-        match self.state {
-            GameState::GameEnded(player) => Some(player),
-            _ => None,
-        }
     }
 
     // First player still over their post-7-roll discard target, scanning in
