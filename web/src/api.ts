@@ -8,9 +8,20 @@ async function unwrap<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export interface CheckpointList {
+  runs: string[];
+  default: string | null;
+}
+
+export async function listCheckpoints(): Promise<CheckpointList> {
+  const res = await fetch("/checkpoints");
+  return unwrap<CheckpointList>(res);
+}
+
 export async function newGame(opts: {
   human_seat?: number;
   seed?: number;
+  checkpoint?: string;
 }): Promise<GameView> {
   const res = await fetch("/games", {
     method: "POST",

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import numpy as np
 from catan_engine import Engine
-from train.network import FeedForwardNN
+from train.network_ff import FeedForwardNN
 from torch.distributions import Categorical
 from tqdm import tqdm
 import torch
@@ -12,7 +12,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DISCOUNT_FACTOR = 0.996
 EPSILON = 0.2
 
-ACTOR_INPUT_SIZE = 732
+ACTOR_INPUT_SIZE = 1002
 ACTOR_OUTPUT_SIZE = 300
 
 

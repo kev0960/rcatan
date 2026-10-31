@@ -80,7 +80,7 @@ fn index_to_action(index: usize) -> Action {
     }
 }
 
-// State vector layout (732 floats), encoded from the current player's perspective.
+// State vector layout (1002 floats), encoded from the current player's perspective.
 // "Rotated player index" = (player_id - current_player + 4) % 4, so index 0 is
 // always the current player, index 1 is the next player to act, etc.
 //
@@ -91,7 +91,11 @@ fn index_to_action(index: usize) -> Action {
 //   [725,  728)  Other players' total resource counts (count / 20, clipped at 1),
 //                rotated so index 0 is the next player after current
 //   [728,  732)  Longest road holder: one-hot[4] (all zero if nobody holds it)
-const STATE_VEC_LEN: usize = 732;
+//   [732, 1002)  Node → adjacent resources: 54 * multi-hot[5]. Entry r is the
+//                number of tiles adjacent to that node producing resource r
+//                (0..=3), normalized by 3. Static per board; encodes each
+//                node's production potential in Resource::ALL order.
+const STATE_VEC_LEN: usize = 1002;
 
 fn state_to_vec(state: State) -> Vec<f32> {
     let current = u8::from(state.current_player);
@@ -145,6 +149,17 @@ fn state_to_vec(state: State) -> Vec<f32> {
     v.extend([0.0f32; 4]);
     if let Some((p, _)) = state.longest_road {
         v[start + rotate(p)] = 1.0;
+    }
+
+    // Node → adjacent resources: 54 * multi-hot[5]. Counts how many adjacent
+    // tiles produce each resource. Static per board (independent of the robber
+    // and of who owns what), giving each node's production potential.
+    for node in 0..54u8 {
+        let start = v.len();
+        v.extend([0.0f32; 5]);
+        for resource in state.board.get_resources_near_node_id(node.into()) {
+            v[start + resource as usize] += 1.0 / 3.0;
+        }
     }
 
     debug_assert_eq!(v.len(), STATE_VEC_LEN);

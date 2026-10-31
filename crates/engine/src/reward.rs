@@ -1,5 +1,4 @@
 use arrayvec::ArrayVec;
-use std::cmp::max;
 
 use crate::PlayerId;
 

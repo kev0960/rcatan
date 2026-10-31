@@ -89,17 +89,17 @@ impl Structure {
     }
 }
 
-// Question:
-//  -- Given the dice role, who will be getting the resource?
-//  -- Given the dice role, which resource will be given?
+// Question: -- Given the dice role, who will be getting the resource? -- Given
+//  the dice role, which resource will be given?
 //
-//  ==> We need the mapping between the digit and the list of houses & resource.
+//  ==> We need the mapping between the digit and the list of houses &
+//  resource.
 //
-//  -- Is the given vertex occupied?
-//  ==> Need a maping between vertex coord and the occupancy (user + (town or city))
+//  -- Is the given vertex occupied? ==> Need a mapping between vertex coord
+//  and the occupancy (user + (town or city))
 //
-//  -- Is the given edge occupied?
-//  ==> Need a mapping between the edge and the occupancy (user)
+//  -- Is the given edge occupied? ==> Need a mapping between the edge and the
+//  occupancy (user)
 
 #[derive(Debug, Clone)]
 pub struct Board {

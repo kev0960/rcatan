@@ -4,7 +4,9 @@ Uses Starlette directly rather than FastAPI to avoid a pydantic/Python 3.14
 incompatibility (pydantic 2.13.3 fails to evaluate `EmailStr | None` on 3.14).
 
 Endpoints:
-  POST /games                  - start a new game (body: {"human_seat"?, "seed"?})
+  GET  /checkpoints            - list available checkpoint runs (newest first)
+  POST /games                  - start a new game
+                                 (body: {"human_seat"?, "seed"?, "checkpoint"?})
   GET  /games/{game_id}        - current snapshot (no state mutation)
   POST /games/{game_id}/action - apply a human action (body: {"action_index"})
   DELETE /games/{game_id}      - drop a session
@@ -30,22 +32,68 @@ from .bot import Bot, RandomBot
 from .session import GameSession
 
 NUM_ACTIONS = 300
-CHECKPOINT_PATH = Path(
-    os.environ.get("CATAN_ACTOR_CHECKPOINT", "checkpoints/actor_latest.pt")
-)
+
+# Checkpoints are organized as `checkpoints/<run-timestamp>/actor_latest.pt`,
+# where the run timestamp is `%Y%m%d-%H%M%S` (so lexical order == chronological
+# order). `CATAN_CHECKPOINT_DIR` overrides the root; `CATAN_ACTOR_CHECKPOINT`
+# pins an explicit checkpoint file, taking precedence over run discovery.
+CHECKPOINT_ROOT = Path(os.environ.get("CATAN_CHECKPOINT_DIR", "checkpoints"))
+CHECKPOINT_OVERRIDE = os.environ.get("CATAN_ACTOR_CHECKPOINT")
+LATEST_FILENAME = "actor_latest.pt"
 
 
-def _load_bot() -> Bot | RandomBot:
-    if CHECKPOINT_PATH.exists():
+def list_runs(root: Path | None = None) -> list[str]:
+    """Run directories under `root` (default `CHECKPOINT_ROOT`) that hold an
+    `actor_latest.pt`, newest first. Names are timestamps, so reverse-sorting
+    is newest-first."""
+    root = root if root is not None else CHECKPOINT_ROOT
+    if not root.is_dir():
+        return []
+    runs = [
+        p.name
+        for p in root.iterdir()
+        if p.is_dir() and (p / LATEST_FILENAME).exists()
+    ]
+    return sorted(runs, reverse=True)
+
+
+def resolve_checkpoint(run: str | None) -> Path | None:
+    """Resolve which checkpoint file to load.
+
+    - explicit `run` -> `<root>/<run>/actor_latest.pt`
+    - else `CATAN_ACTOR_CHECKPOINT` if set
+    - else the latest run's `actor_latest.pt`
+    - else the legacy flat `<root>/actor_latest.pt`
+
+    Returns None if the resolved path does not exist.
+    """
+    if run is not None:
+        candidate = CHECKPOINT_ROOT / run / LATEST_FILENAME
+        return candidate if candidate.exists() else None
+    if CHECKPOINT_OVERRIDE:
+        override = Path(CHECKPOINT_OVERRIDE)
+        return override if override.exists() else None
+    runs = list_runs()
+    if runs:
+        return CHECKPOINT_ROOT / runs[0] / LATEST_FILENAME
+    legacy = CHECKPOINT_ROOT / LATEST_FILENAME
+    return legacy if legacy.exists() else None
+
+
+def _load_bot(run: str | None = None) -> Bot | RandomBot:
+    path = resolve_checkpoint(run)
+    if path is not None:
         try:
-            print(f"[server] loading actor from {CHECKPOINT_PATH}")
-            return Bot.from_checkpoint(CHECKPOINT_PATH)
+            print(f"[server] loading actor from {path}")
+            return Bot.from_checkpoint(path)
         except Exception as e:  # noqa: BLE001
             print(f"[server] failed to load checkpoint ({e}); falling back to random bot")
             return RandomBot()
+    where = f"run {run!r}" if run else f"under {CHECKPOINT_ROOT}"
     print(
-        f"[server] no checkpoint at {CHECKPOINT_PATH}; using RandomBot. "
-        "Train one via `uv run -m train` to produce checkpoints/actor_latest.pt."
+        f"[server] no checkpoint for {where}; using RandomBot. "
+        "Train one via `uv run -m train` to produce "
+        "checkpoints/<timestamp>/actor_latest.pt."
     )
     return RandomBot()
 
@@ -92,11 +140,37 @@ def _validate_action_index(value: Any) -> int:
     return value
 
 
+def _validate_run(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise _http_error(400, "checkpoint must be a string run name")
+    if value not in list_runs():
+        raise _http_error(404, f"unknown checkpoint run: {value}")
+    return value
+
+
 def create_app() -> Starlette:
-    bot = _load_bot()
     sessions: dict[str, GameSession] = {}
     sessions_lock = threading.Lock()
     rng = random.Random()
+
+    # Lazily loaded bots keyed by run name (None -> server default). Loading a
+    # checkpoint is expensive, so each run is only loaded once and reused across
+    # games.
+    bots: dict[str | None, Bot | RandomBot] = {}
+    bots_lock = threading.Lock()
+
+    def get_bot(run: str | None) -> Bot | RandomBot:
+        with bots_lock:
+            if run in bots:
+                return bots[run]
+        bot = _load_bot(run)
+        with bots_lock:
+            return bots.setdefault(run, bot)
+
+    # Warm the default bot at startup so the first game doesn't pay the load.
+    get_bot(None)
 
     def _get(game_id: str) -> GameSession:
         with sessions_lock:
@@ -105,10 +179,15 @@ def create_app() -> Starlette:
             raise _http_error(404, "game not found")
         return session
 
+    async def list_checkpoints(request: Request) -> JSONResponse:
+        runs = list_runs()
+        return JSONResponse({"runs": runs, "default": runs[0] if runs else None})
+
     async def new_game(request: Request) -> JSONResponse:
         try:
             body = await _read_json(request)
             seat = _validate_seat(body.get("human_seat"))
+            run = _validate_run(body.get("checkpoint"))
             seed = body.get("seed")
             if seed is not None and not isinstance(seed, int):
                 raise _http_error(400, "seed must be an int")
@@ -118,7 +197,7 @@ def create_app() -> Starlette:
             seat = rng.randint(0, 3)
         if seed is None:
             seed = rng.randint(0, 2**31 - 1)
-        session = GameSession.new(bot=bot, human_seat=seat, seed=seed)
+        session = GameSession.new(bot=get_bot(run), human_seat=seat, seed=seed)
         with sessions_lock:
             sessions[session.game_id] = session
         with session.lock:
@@ -152,6 +231,7 @@ def create_app() -> Starlette:
         return JSONResponse({"ok": True})
 
     routes = [
+        Route("/checkpoints", list_checkpoints, methods=["GET"]),
         Route("/games", new_game, methods=["POST"]),
         Route("/games/{game_id}", get_game, methods=["GET"]),
         Route("/games/{game_id}/action", post_action, methods=["POST"]),

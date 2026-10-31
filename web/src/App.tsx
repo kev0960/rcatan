@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Board } from "./board/Board";
 import { PLAYER_COLORS } from "./board/layout";
-import { newGame, postAction } from "./api";
+import { listCheckpoints, newGame, postAction } from "./api";
 import type { DecodedAction, GameView } from "./types";
 
 const NON_BOARD_KINDS = new Set([
@@ -225,12 +225,18 @@ export default function App() {
   const [view, setView] = useState<GameView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [runs, setRuns] = useState<string[]>([]);
+  // "" means "let the server pick the latest checkpoint".
+  const [checkpoint, setCheckpoint] = useState<string>("");
 
   async function start(seat?: number) {
     setBusy(true);
     setError(null);
     try {
-      const v = await newGame(seat !== undefined ? { human_seat: seat } : {});
+      const v = await newGame({
+        ...(seat !== undefined ? { human_seat: seat } : {}),
+        ...(checkpoint ? { checkpoint } : {}),
+      });
       setView(v);
     } catch (e) {
       setError(String(e));
@@ -259,11 +265,33 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Load the available checkpoint runs for the selector.
+  useEffect(() => {
+    listCheckpoints()
+      .then((c) => setRuns(c.runs))
+      .catch(() => setRuns([]));
+  }, []);
+
   return (
     <div className="app">
       <header>
         <h1>rcatan</h1>
         <div className="controls">
+          <label className="checkpoint-select">
+            bot:
+            <select
+              value={checkpoint}
+              onChange={(e) => setCheckpoint(e.target.value)}
+              disabled={busy}
+            >
+              <option value="">latest</option>
+              {runs.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+          </label>
           <button onClick={() => start()} disabled={busy}>
             New game (random seat)
           </button>

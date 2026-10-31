@@ -215,35 +215,11 @@ fn bfs_on_graph(
     connected
 }
 
-trait CountUniqueAtMost2: Iterator + Sized
-where
-    Self::Item: PartialEq,
-{
-    fn count_unique_at_most2(mut self) -> usize {
-        let Some(first) = self.next() else { return 0 };
-
-        for x in self {
-            if x != first {
-                return 2;
-            }
-        }
-        1
-    }
-}
-
-impl<I> CountUniqueAtMost2 for I
-where
-    I: Iterator,
-    I::Item: PartialEq,
-{
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::action::Building;
     use crate::board::Board;
-    use crate::player::Player;
 
     // Road layout reference (road_id → [node, node]):
     //   0:[0,3]  1:[0,4]  2:[1,4]  3:[1,5]  4:[2,5]  5:[2,6]

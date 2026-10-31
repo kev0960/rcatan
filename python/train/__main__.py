@@ -16,7 +16,7 @@ LOG_DIR = Path("logs")
 RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
 TRAIN_LOG = LOG_DIR / f"train-{RUN_TIMESTAMP}.csv"
 VALIDATION_LOG = LOG_DIR / f"validation-{RUN_TIMESTAMP}.csv"
-CHECKPOINT_DIR = Path("checkpoints")
+CHECKPOINT_DIR = Path("checkpoints") / RUN_TIMESTAMP
 LATEST_CHECKPOINT = CHECKPOINT_DIR / "actor_latest.pt"
 
 
