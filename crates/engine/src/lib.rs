@@ -16,6 +16,8 @@ pub use action::DevCard;
 pub use action::Resource;
 pub use board::TileType;
 pub use engine::Engine;
+pub use player::Port;
+pub use player::port_at_node;
 pub use reward::Reward;
 pub use state::FullState;
 pub use state::Phase;

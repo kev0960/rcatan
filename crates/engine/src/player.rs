@@ -17,7 +17,7 @@ use crate::util::id::PlayerId;
 use crate::util::id::RoadId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Port {
+pub enum Port {
     Brick,
     Lumber,
     Ore,
@@ -28,6 +28,12 @@ enum Port {
 
 static NODE_TO_PORTS: Lazy<[Option<Port>; 54]> =
     Lazy::new(build_node_to_ports_table);
+
+// The port a settlement or city on `node_id` gets access to, if any. Ports are
+// fixed across games.
+pub fn port_at_node(node_id: NodeId) -> Option<Port> {
+    NODE_TO_PORTS[usize::from(node_id)]
+}
 
 fn build_node_to_ports_table() -> [Option<Port>; 54] {
     let mut node_to_ports: [Option<Port>; 54] = [None; 54];
@@ -73,6 +79,10 @@ impl Player {
             num_city: 0,
             num_used_knight_cards: 0,
         }
+    }
+
+    pub fn used_dev_card_current_turn(&self) -> bool {
+        self.used_dev_card_current_turn
     }
 
     pub fn num_resource_cards(&self) -> u8 {
@@ -456,6 +466,17 @@ fn generate_maritime_trade_actions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn port_at_node_matches_table() {
+        assert_eq!(port_at_node(NodeId::new(11)), Some(Port::Brick));
+        assert_eq!(port_at_node(NodeId::new(0)), Some(Port::ThreeToOne));
+        assert_eq!(port_at_node(NodeId::new(12)), None);
+        let count = (0..54u8)
+            .filter(|&n| port_at_node(NodeId::new(n)).is_some())
+            .count();
+        assert_eq!(count, 18);
+    }
 
     fn p0() -> PlayerId {
         PlayerId::new(0)

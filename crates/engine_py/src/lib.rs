@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rcatan::{
     Action, Building, DevCard, Engine, FullState, Phase, PlayerId, Resource,
-    State, TileType,
+    State, TileType, port_at_node,
 };
 
 // Action space layout (300 total):
@@ -80,7 +80,7 @@ fn index_to_action(index: usize) -> Action {
     }
 }
 
-// State vector layout (1002 floats), encoded from the current player's perspective.
+// State vector layout (1976 floats), encoded from the current player's perspective.
 // "Rotated player index" = (player_id - current_player + 4) % 4, so index 0 is
 // always the current player, index 1 is the next player to act, etc.
 //
@@ -91,11 +91,48 @@ fn index_to_action(index: usize) -> Action {
 //   [725,  728)  Other players' total resource counts (count / 20, clipped at 1),
 //                rotated so index 0 is the next player after current
 //   [728,  732)  Longest road holder: one-hot[4] (all zero if nobody holds it)
-//   [732, 1002)  Node → adjacent resources: 54 * multi-hot[5]. Entry r is the
-//                number of tiles adjacent to that node producing resource r
-//                (0..=3), normalized by 3. Static per board; encodes each
-//                node's production potential in Resource::ALL order.
-const STATE_VEC_LEN: usize = 1002;
+//   [732, 1920)  Node features: 54 * [22]. Per node:
+//                  [0, 5)   pips per resource from adjacent tiles / 15, in
+//                           Resource::ALL order (pips = ways two dice roll
+//                           the tile's number: 2 and 12 -> 1, 6 and 8 -> 5)
+//                  [5, 15)  adjacent tiles per dice number / 2, in order
+//                           2, 3, 4, 5, 6, 8, 9, 10, 11, 12
+//                  15       1 if the robber is on an adjacent producing tile
+//                  [16, 22) port at this node: one-hot over brick, lumber,
+//                           ore, grain, wool (2:1) and 3:1; all zero if none
+//   [1920, 1970) Current player's cards received per (resource, dice number):
+//                5 * [10], resource-major in Resource::ALL order, same dice
+//                order as above (count / 4, clipped at 1). Respects the robber,
+//                so it shows what the player is paid in on each roll.
+//   [1970, 1976) Ports the current player owns: multi-hot, same port order.
+//   [1976, 1982) Phase: one-hot over initial settlement, initial road,
+//                discard, move robber, steal, normal turn
+//   [1982, 1985) Dev card being resolved: one-hot over road building, year of
+//                plenty, monopoly (all zero if none)
+//   1985         Cards the current player still has to discard / 10, clipped
+//   [1986, 1991) Current player's playable dev cards / 5, clipped, in
+//                DevCard::ALL order (knight, VP, road building, year of
+//                plenty, monopoly)
+//   [1991, 1996) Current player's dev cards bought this turn / 2, clipped
+//   1996         1 if the current player already played a dev card this turn
+//   [1997, 2001) VPs / 10, rotated. Index 0 is the current player's full VP
+//                (including its VP cards); the others are public VPs only
+//                (buildings, longest road, largest army)
+//   [2001, 2005) Knights played / 7, clipped, rotated
+//   [2005, 2009) Largest army holder: one-hot[4], rotated
+//   [2009, 2013) Longest road length / 15, rotated
+//   [2013, 2016) Other players' dev card counts (held + bought this turn) / 5,
+//                clipped, rotated so index 0 is the next player after current
+const STATE_VEC_LEN: usize = 2016;
+
+// Pips for dice numbers 2..=12: the number of two-dice combinations that roll
+// each number.
+const PIPS: [f32; 11] = [1., 2., 3., 4., 5., 6., 5., 4., 3., 2., 1.];
+
+// Slot of a dice number in the 10-wide per-number features (7 has none).
+fn dice_slot(dice: u8) -> usize {
+    if dice < 7 { dice as usize - 2 } else { dice as usize - 3 }
+}
 
 fn state_to_vec(state: State) -> Vec<f32> {
     let current = u8::from(state.current_player);
@@ -151,15 +188,134 @@ fn state_to_vec(state: State) -> Vec<f32> {
         v[start + rotate(p)] = 1.0;
     }
 
-    // Node → adjacent resources: 54 * multi-hot[5]. Counts how many adjacent
-    // tiles produce each resource. Static per board (independent of the robber
-    // and of who owns what), giving each node's production potential.
+    // Node features: 54 * [22]. Pips per resource say what a node produces
+    // and how often; the per-number counts say which rolls pay out, so the
+    // agent can tell spreading its numbers from stacking them.
     for node in 0..54u8 {
         let start = v.len();
-        v.extend([0.0f32; 5]);
-        for resource in state.board.get_resources_near_node_id(node.into()) {
-            v[start + resource as usize] += 1.0 / 3.0;
+        v.extend([0.0f32; 22]);
+        if let Some(port) = port_at_node(node.into()) {
+            v[start + 16 + port as usize] = 1.0;
         }
+        for (dice, resource, has_robber) in
+            state.board.get_tiles_near_node_id(node.into())
+        {
+            v[start + resource as usize] += PIPS[dice as usize - 2] / 15.0;
+            v[start + 5 + dice_slot(dice)] += 0.5;
+            if has_robber {
+                v[start + 15] = 1.0;
+            }
+        }
+    }
+
+    // Current player's cards received per (resource, dice number).
+    let start = v.len();
+    v.extend([0.0f32; 50]);
+    for dice in (2..=12u8).filter(|&d| d != 7) {
+        for (player, resource, cards) in state.board.get_matching_resources(dice)
+        {
+            if player == state.current_player {
+                v[start + resource as usize * 10 + dice_slot(dice)] +=
+                    cards as f32 / 4.0;
+            }
+        }
+    }
+    for x in &mut v[start..] {
+        *x = x.min(1.0);
+    }
+
+    // Ports the current player owns.
+    let start = v.len();
+    v.extend([0.0f32; 6]);
+    for (node, structure) in state.board.structures.iter().enumerate() {
+        if let Some((_, p)) = structure.get()
+            && p == state.current_player
+            && let Some(port) = port_at_node((node as u8).into())
+        {
+            v[start + port as usize] = 1.0;
+        }
+    }
+
+    // Phase: one-hot[6]. All zero once the game has ended.
+    let phase_slot = match state.phase {
+        Phase::InitialSettlementPlacement => Some(0),
+        Phase::InitialRoadPlacement => Some(1),
+        Phase::Discard { .. } => Some(2),
+        Phase::MoveRobber => Some(3),
+        Phase::StealResource => Some(4),
+        Phase::ContinueAction => Some(5),
+        Phase::GameEnded => None,
+    };
+    let start = v.len();
+    v.extend([0.0f32; 6]);
+    if let Some(slot) = phase_slot {
+        v[start + slot] = 1.0;
+    }
+
+    // Dev card being resolved: one-hot[3].
+    let start = v.len();
+    v.extend([0.0f32; 3]);
+    match state.pending_dev_card {
+        Some(DevCard::RoadBuilding) => v[start] = 1.0,
+        Some(DevCard::YearOfPlenty) => v[start + 1] = 1.0,
+        Some(DevCard::Monopoly) => v[start + 2] = 1.0,
+        _ => {}
+    }
+
+    // Cards the current player still has to discard.
+    let to_discard = match state.phase {
+        Phase::Discard { target_counts } => {
+            let hand: u8 = state.player_cards[current_idx].iter().sum();
+            hand.saturating_sub(target_counts[current_idx])
+        }
+        _ => 0,
+    };
+    v.push((to_discard as f32 / 10.0).min(1.0));
+
+    // Current player's dev cards: playable, then bought this turn.
+    for &count in &state.dev_cards[current_idx] {
+        v.push((count as f32 / 5.0).min(1.0));
+    }
+    for &count in &state.dev_cards_bought[current_idx] {
+        v.push((count as f32 / 2.0).min(1.0));
+    }
+    v.push(if state.used_dev_card_this_turn { 1.0 } else { 0.0 });
+
+    // VPs, rotated. Only the current player's own VP cards are visible.
+    for offset in 0..4 {
+        let p_idx = (current_idx + offset) % 4;
+        let vp = match offset {
+            0 => state.vps[p_idx],
+            _ => state.public_vps[p_idx],
+        };
+        v.push(vp as f32 / 10.0);
+    }
+
+    // Knights played, rotated.
+    for offset in 0..4 {
+        let p_idx = (current_idx + offset) % 4;
+        v.push((state.knights_played[p_idx] as f32 / 7.0).min(1.0));
+    }
+
+    // Largest army holder: one-hot[4].
+    let start = v.len();
+    v.extend([0.0f32; 4]);
+    if let Some((p, _)) = state.largest_army {
+        v[start + rotate(p)] = 1.0;
+    }
+
+    // Longest road length per player, rotated.
+    for offset in 0..4 {
+        let p_idx = (current_idx + offset) % 4;
+        v.push(state.road_lengths[p_idx] as f32 / 15.0);
+    }
+
+    // Other players' dev card counts, rotated (next player first).
+    for offset in 1..4 {
+        let p_idx = (current_idx + offset) % 4;
+        let held: u8 = state.dev_cards[p_idx].iter().sum();
+        let bought: u8 = state.dev_cards_bought[p_idx].iter().sum();
+        v.push(((held + bought) as f32 / 5.0).min(1.0));
     }
 
     debug_assert_eq!(v.len(), STATE_VEC_LEN);

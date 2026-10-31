@@ -1,18 +1,19 @@
 from pathlib import Path
 
 import numpy as np
+import torch
 from catan_engine import Engine
-from train.network_ff import FeedForwardNN
 from torch.distributions import Categorical
 from tqdm import tqdm
-import torch
+
+from train.network_ff import FeedForwardNN
 
 SEED = 42
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DISCOUNT_FACTOR = 0.996
 EPSILON = 0.2
 
-ACTOR_INPUT_SIZE = 1002
+ACTOR_INPUT_SIZE = 2016
 ACTOR_OUTPUT_SIZE = 300
 
 
@@ -80,6 +81,11 @@ class PPO:
         # stack(values) is (T, B, 1)
         values = torch.stack(self.buf_values).squeeze(-1).to(DEVICE)
 
+        # How much of the return variance the critic explained, using the
+        # values predicted while collecting (before training on this batch).
+        # 1 = perfect, 0 = no better than predicting the mean.
+        explained_var = 1 - (returns - values).var() / (returns.var() + 1e-8)
+
         advantages = returns - values
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
@@ -97,6 +103,8 @@ class PPO:
         sum_critic_loss = 0.0
         sum_entropy = 0.0
         sum_loss = 0.0
+        sum_approx_kl = 0.0
+        sum_clip_frac = 0.0
         n_updates = 0
 
         for _ in tqdm(range(4), desc="train", leave=False):
@@ -145,6 +153,16 @@ class PPO:
                 sum_critic_loss += critic_loss.item()
                 sum_entropy += entropy.item()
                 sum_loss += loss.item()
+
+                # How far this update moved the policy: KL(old || new)
+                # estimated as E[(r - 1) - log r], and the share of samples
+                # where the ratio left the clip range.
+                with torch.no_grad():
+                    log_ratio = logp_new - mb_log_probs_old
+                    sum_approx_kl += ((ratio - 1) - log_ratio).mean().item()
+                    sum_clip_frac += (
+                        ((ratio - 1).abs() > EPSILON).float().mean().item()
+                    )
                 n_updates += 1
 
         self.buf_states.clear()
@@ -165,6 +183,9 @@ class PPO:
             "return_std": flat_returns.std().item(),
             "value_mean": values.mean().item(),
             "value_std": values.std().item(),
+            "explained_var": explained_var.item(),
+            "approx_kl": sum_approx_kl / n_updates,
+            "clip_frac": sum_clip_frac / n_updates,
         }
 
     # Denote the state as s_(player)_(turn) where player is 0-3.

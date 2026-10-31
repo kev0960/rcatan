@@ -1,7 +1,9 @@
 import csv
 from datetime import datetime
 from pathlib import Path
+
 from tqdm import tqdm
+
 from train.ppo import PPO
 
 BATCH_SIZE = 64
@@ -9,7 +11,7 @@ SEED = 42
 NUM_STEPS = 3000
 NUM_ITERATIONS = 300
 MINI_BATCH_SIZE = 1024
-VALIDATE_EVERY = 10
+VALIDATE_EVERY = 100
 VALIDATE_MATCHES_RANDOM = 100
 VALIDATE_MATCHES_CHECKPOINT = 200
 LOG_DIR = Path("logs")
@@ -42,6 +44,9 @@ def main():
             "return_std",
             "value_mean",
             "value_std",
+            "explained_var",
+            "approx_kl",
+            "clip_frac",
         ],
     )
     val_file, val_writer = _open_csv(
@@ -78,6 +83,8 @@ def main():
                 actor=f"{metrics['actor_loss']:.3f}",
                 critic=f"{metrics['critic_loss']:.3f}",
                 entropy=f"{metrics['entropy']:.3f}",
+                ev=f"{metrics['explained_var']:.2f}",
+                kl=f"{metrics['approx_kl']:.4f}",
             )
 
             train_writer.writerow(
@@ -91,6 +98,9 @@ def main():
                     f"{metrics['return_std']:.6f}",
                     f"{metrics['value_mean']:.6f}",
                     f"{metrics['value_std']:.6f}",
+                    f"{metrics['explained_var']:.6f}",
+                    f"{metrics['approx_kl']:.6f}",
+                    f"{metrics['clip_frac']:.6f}",
                 ]
             )
             train_file.flush()

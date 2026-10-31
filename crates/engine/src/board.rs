@@ -182,7 +182,7 @@ impl Board {
         ];
 
         let dice_digits =
-            [5, 6, 11, 5, 8, 10, 9, 2, 10, 12, 9, 8, 3, 4, 3, 4, 6, 11];
+            [5, 2, 6, 3, 8, 10, 9, 12, 11, 4, 8, 10, 9, 4, 5, 6, 3, 11];
 
         let mut resources = vec![
             vec![TileType::Hills; 3],
@@ -247,6 +247,30 @@ impl Board {
             .into_iter()
             .filter_map(|id| {
                 tile_type_to_resource(self.tiles[usize::from(*id)])
+            })
+            .collect()
+    }
+
+    // Each resource-producing tile adjacent to `node_id`, as (dice number,
+    // resource, whether the robber is on it). The desert is skipped.
+    pub fn get_tiles_near_node_id(
+        &self,
+        node_id: NodeId,
+    ) -> ArrayVec<(u8, Resource, bool), 3> {
+        let mut by_tile_id: [Option<(u8, Tile)>; 19] = [None; 19];
+        for (dice_offset, tiles) in self.dice_to_tiles.iter().enumerate() {
+            for t in tiles {
+                by_tile_id[usize::from(t.tile_index)] =
+                    Some((dice_offset as u8 + 2, *t));
+            }
+        }
+
+        NODE_TO_TILE[usize::from(node_id)]
+            .iter()
+            .filter_map(|id| {
+                let (dice, tile) = by_tile_id[usize::from(*id)]?;
+                let resource = tile_type_to_resource(tile.tile_type)?;
+                Some((dice, resource, tile.has_robber))
             })
             .collect()
     }
@@ -416,5 +440,29 @@ mod tests {
 
         let result = board.get_matching_resources(5);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn get_tiles_near_node_id_reports_dice_and_resource() {
+        let board = Board::new(&[(5, TileType::Fields)]);
+
+        let tiles = board.get_tiles_near_node_id(NodeId::new(0));
+        assert_eq!(tiles.as_slice(), &[(5, Resource::Grain, false)]);
+    }
+
+    #[test]
+    fn get_tiles_near_node_id_reports_robber() {
+        let mut board = Board::new(&[(5, TileType::Fields)]);
+        board.dice_to_tiles[(5 - 2) as usize][0].has_robber = true;
+
+        let tiles = board.get_tiles_near_node_id(NodeId::new(0));
+        assert_eq!(tiles.as_slice(), &[(5, Resource::Grain, true)]);
+    }
+
+    #[test]
+    fn get_tiles_near_node_id_skips_desert() {
+        let board = Board::new(&[(7, TileType::Desert)]);
+
+        assert!(board.get_tiles_near_node_id(NodeId::new(0)).is_empty());
     }
 }

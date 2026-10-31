@@ -1,3 +1,4 @@
+use crate::DevCard;
 use crate::PlayerId;
 use crate::board::Board;
 
@@ -8,6 +9,25 @@ pub struct State {
     // Resource card counts per player: player_cards[player_id][resource_idx].
     // Only the 5 resource slots are exposed (not dev cards).
     pub player_cards: [[u8; 5]; 4],
+    pub phase: Phase,
+    // The multi-step dev card being resolved (RoadBuilding, YearOfPlenty,
+    // Monopoly), if any. `phase` is ContinueAction while it resolves.
+    pub pending_dev_card: Option<DevCard>,
+    // Dev card counts per player in DevCard::ALL order: playable ones, and
+    // ones bought this turn (not playable until next turn).
+    pub dev_cards: [[u8; 5]; 4],
+    pub dev_cards_bought: [[u8; 5]; 4],
+    // Whether the current player already played a dev card this turn.
+    pub used_dev_card_this_turn: bool,
+    // Full VPs, including hidden VP cards. Only the current player's own
+    // entry is public; use `public_vps` for everyone else.
+    pub vps: [u8; 4],
+    // VPs visible to all players: buildings, longest road and largest army.
+    pub public_vps: [u8; 4],
+    pub knights_played: [u8; 4],
+    pub largest_army: Option<(PlayerId, u8)>,
+    // Each player's longest road length.
+    pub road_lengths: [u8; 4],
 }
 
 // A coarse phase tag that's stable to surface to external consumers (UI,

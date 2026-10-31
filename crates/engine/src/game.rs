@@ -32,6 +32,9 @@ struct GameDetail {
     // 4 bits for each player's victory points
     vp: VictoryPoint,
     total_turns: u16,
+
+    // Each player's longest road length, refreshed with the longest road.
+    road_lengths: [u8; 4],
 }
 
 impl GameDetail {
@@ -41,6 +44,7 @@ impl GameDetail {
             largest_army: 0,
             vp: VictoryPoint::new(ArrayVec::from([0; 4])),
             total_turns: 0,
+            road_lengths: [0; 4],
         }
     }
 
@@ -177,11 +181,58 @@ impl Game {
             }
         }
 
+        let mut dev_cards = [[0u8; 5]; 4];
+        let mut dev_cards_bought = [[0u8; 5]; 4];
+        let mut vps = [0u8; 4];
+        let mut public_vps = [0u8; 4];
+        let mut knights_played = [0u8; 4];
+        for (i, p) in self.players.iter().enumerate() {
+            for j in 0..5 {
+                dev_cards[i][j] = p.cards[5 + j];
+                dev_cards_bought[i][j] = p.dev_card_bought[j];
+            }
+            // Counted from the pieces rather than `game_detail.vp`, which
+            // floors every player at 2 for reward shaping.
+            public_vps[i] = p.num_settlement + p.num_city * 2;
+            // VP cards are hidden from other players, both the ones held and
+            // the ones bought this turn (which count immediately).
+            let vp_card = DevCard::VictoryPoint as usize;
+            vps[i] = p.cards[vp_card] + p.dev_card_bought[vp_card - 5];
+            knights_played[i] = p.num_used_knight_cards;
+        }
+        let holders = [
+            self.game_detail.get_longest_road(),
+            self.game_detail.get_largest_army(),
+        ];
+        for (p, _) in holders.into_iter().flatten() {
+            public_vps[usize::from(p)] += 2;
+        }
+        for i in 0..4 {
+            vps[i] += public_vps[i];
+        }
+
+        let pending_dev_card = match self.state {
+            GameState::UsedDevCard((dev_card, _)) => Some(dev_card),
+            _ => None,
+        };
+
         State {
             current_player: self.current_player_id(),
             board: self.board.clone(),
             longest_road: self.game_detail.get_longest_road(),
             player_cards,
+            phase: self.phase(),
+            pending_dev_card,
+            dev_cards,
+            dev_cards_bought,
+            used_dev_card_this_turn: self.players
+                [usize::from(self.current_player_id())]
+            .used_dev_card_current_turn(),
+            vps,
+            public_vps,
+            knights_played,
+            largest_army: self.game_detail.get_largest_army(),
+            road_lengths: self.game_detail.road_lengths,
         }
     }
 
@@ -195,8 +246,21 @@ impl Game {
             vps[i] = self.game_detail.vp.get_vp(p.id);
         }
 
-        // Map the engine's internal GameState to the externally-facing Phase.
-        let phase = match self.state {
+        FullState {
+            current_player: self.current_player_id(),
+            board: self.board.clone(),
+            longest_road: self.game_detail.get_longest_road(),
+            player_cards,
+            vps,
+            last_dice_roll: self.last_dice_roll,
+            phase: self.phase(),
+            winner: self.is_game_ended(),
+        }
+    }
+
+    // Map the engine's internal GameState to the externally-facing Phase.
+    fn phase(&self) -> Phase {
+        match self.state {
             GameState::InitialBoardSetup(step) => {
                 if step % 2 == 0 {
                     Phase::InitialSettlementPlacement
@@ -220,17 +284,6 @@ impl Game {
                 DevCard::YearOfPlenty => Phase::ContinueAction,
                 DevCard::Monopoly => Phase::ContinueAction,
             },
-        };
-
-        FullState {
-            current_player: self.current_player_id(),
-            board: self.board.clone(),
-            longest_road: self.game_detail.get_longest_road(),
-            player_cards,
-            vps,
-            last_dice_roll: self.last_dice_roll,
-            phase,
-            winner: self.is_game_ended(),
         }
     }
 
@@ -512,6 +565,10 @@ impl Game {
                 current_player.cards[Resource::Grain as usize] -= 1;
                 current_player.cards[Resource::Wool as usize] -= 1;
                 current_player.add_dev_card(dev_card);
+
+                if dev_card == DevCard::VictoryPoint {
+                    should_recompute_vp = true;
+                }
             }
             Action::UseDevCard(dev_card) => {
                 self.current_player_mut().use_dev_card(dev_card);
@@ -770,6 +827,9 @@ impl Game {
     fn compute_longest_road(&mut self) {
         let longest_road = find_longest_road(&self.board);
         let longest_length = *longest_road.iter().max().unwrap() as u8;
+        for (i, length) in longest_road.iter().enumerate() {
+            self.game_detail.road_lengths[i] = *length;
+        }
 
         if longest_length < 5 {
             self.game_detail.set_longest_road(None);
@@ -1111,6 +1171,35 @@ mod tests {
         // (compute_longest_road may recalculate and override, but with 6
         // roads built the actual longest road computation determines the holder)
         assert!(game.game_detail.vp.get_vp(p(0)) >= 2);
+    }
+
+    // ---- State tests ----
+
+    #[test]
+    fn state_hides_vp_cards_from_public_vps() {
+        let mut game = game_with_empty_board();
+        game.players[0].num_settlement = 2;
+        game.players[0].num_city = 1;
+        game.players[0].cards[DevCard::VictoryPoint as usize] = 1;
+        game.players[0].dev_card_bought[DevCard::VictoryPoint as usize - 5] = 1;
+        game.game_detail.set_largest_army(Some((p(0), 3)));
+
+        let state = game.state();
+        // 2 settlements + 1 city + largest army = 6 public; + 2 VP cards.
+        assert_eq!(state.public_vps[0], 6);
+        assert_eq!(state.vps[0], 8);
+        assert_eq!(state.public_vps[1], 0);
+    }
+
+    #[test]
+    fn state_reports_road_length_per_player() {
+        let mut game = game_with_empty_board();
+        for i in 0..3 {
+            game.board.build_road(RoadId::new(i), p(1));
+        }
+
+        game.compute_victory_point();
+        assert_eq!(game.state().road_lengths, [0, 3, 0, 0]);
     }
 
     // ---- handle_non_7_dice_roll tests ----
