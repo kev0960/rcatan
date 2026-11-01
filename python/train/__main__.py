@@ -1,17 +1,19 @@
+import argparse
 import csv
+import os
 from datetime import datetime
 from pathlib import Path
 
 from tqdm import tqdm
 
-from train.ppo import PPO
+from train.ppo import DEFAULT_NETWORK, NETWORKS, PPO
 
 BATCH_SIZE = 64
 SEED = 42
 NUM_STEPS = 3000
 NUM_ITERATIONS = 300
 MINI_BATCH_SIZE = 1024
-VALIDATE_EVERY = 100
+VALIDATE_EVERY = 10
 VALIDATE_MATCHES_RANDOM = 100
 VALIDATE_MATCHES_CHECKPOINT = 200
 LOG_DIR = Path("logs")
@@ -20,6 +22,9 @@ TRAIN_LOG = LOG_DIR / f"train-{RUN_TIMESTAMP}.csv"
 VALIDATION_LOG = LOG_DIR / f"validation-{RUN_TIMESTAMP}.csv"
 CHECKPOINT_DIR = Path("checkpoints") / RUN_TIMESTAMP
 LATEST_CHECKPOINT = CHECKPOINT_DIR / "actor_latest.pt"
+# Actor checkpoint from another run to play head-to-head during validation,
+# e.g. the feed-forward baseline when training the graph network.
+BASELINE_CHECKPOINT = os.environ.get("CATAN_BASELINE_CHECKPOINT")
 
 
 def _open_csv(path: Path, header: list[str]):
@@ -31,7 +36,28 @@ def _open_csv(path: Path, header: list[str]):
     return f, writer
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="python -m train")
+    parser.add_argument(
+        "--network",
+        choices=NETWORKS,
+        default=DEFAULT_NETWORK,
+        help="actor and critic architecture: graph (graph attention over the "
+        "board) or ff (feed-forward) (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--compile",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="run the actor and critic through torch.compile for faster "
+        "training; the first iterations are slower while it compiles "
+        "(default: on)",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
     train_file, train_writer = _open_csv(
         TRAIN_LOG,
         [
@@ -69,11 +95,19 @@ def main():
             "avg_steps_vs_90",
             "avg_vp_vs_90",
             "avg_opp_vp_vs_90",
+            "win_rate_vs_baseline",
+            "avg_steps_vs_baseline",
+            "avg_vp_vs_baseline",
+            "avg_opp_vp_vs_baseline",
         ],
     )
 
     try:
-        ppo = PPO(batch_size=BATCH_SIZE)
+        tqdm.write(
+            f"network: {args.network}, compile: {args.compile}, "
+            f"baseline: {BASELINE_CHECKPOINT}"
+        )
+        ppo = PPO(batch_size=BATCH_SIZE, network=args.network, compile=args.compile)
         pbar = tqdm(range(NUM_ITERATIONS), desc="iter")
         for i in pbar:
             ppo.observe(NUM_STEPS)
@@ -112,6 +146,7 @@ def main():
                     num_matches_checkpoint=VALIDATE_MATCHES_CHECKPOINT,
                     checkpoint_dir=CHECKPOINT_DIR,
                     checkpoint_step=VALIDATE_EVERY,
+                    baseline_checkpoint=BASELINE_CHECKPOINT,
                 )
                 tqdm.write(
                     f"[iter {i + 1}] "
@@ -122,7 +157,9 @@ def main():
                     f"vs 75%: win {val_metrics['win_rate_vs_75']:.2%} "
                     f"vp {val_metrics['avg_vp_vs_75']:.2f}/{val_metrics['avg_opp_vp_vs_75']:.2f} | "
                     f"vs 90%: win {val_metrics['win_rate_vs_90']:.2%} "
-                    f"vp {val_metrics['avg_vp_vs_90']:.2f}/{val_metrics['avg_opp_vp_vs_90']:.2f} "
+                    f"vp {val_metrics['avg_vp_vs_90']:.2f}/{val_metrics['avg_opp_vp_vs_90']:.2f} | "
+                    f"vs baseline: win {val_metrics['win_rate_vs_baseline']:.2%} "
+                    f"vp {val_metrics['avg_vp_vs_baseline']:.2f}/{val_metrics['avg_opp_vp_vs_baseline']:.2f} "
                     f"(random: {VALIDATE_MATCHES_RANDOM}, ckpt: {VALIDATE_MATCHES_CHECKPOINT} matches)"
                 )
                 val_writer.writerow(
@@ -144,6 +181,10 @@ def main():
                         f"{val_metrics['avg_steps_vs_90']:.2f}",
                         f"{val_metrics['avg_vp_vs_90']:.4f}",
                         f"{val_metrics['avg_opp_vp_vs_90']:.4f}",
+                        f"{val_metrics['win_rate_vs_baseline']:.6f}",
+                        f"{val_metrics['avg_steps_vs_baseline']:.2f}",
+                        f"{val_metrics['avg_vp_vs_baseline']:.4f}",
+                        f"{val_metrics['avg_opp_vp_vs_baseline']:.4f}",
                     ]
                 )
                 val_file.flush()

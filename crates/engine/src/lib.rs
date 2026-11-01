@@ -22,6 +22,7 @@ pub use reward::Reward;
 pub use state::FullState;
 pub use state::Phase;
 pub use state::State;
+pub use table::ROAD_TO_NODES;
 pub use util::id::NodeId;
 pub use util::id::PlayerId;
 pub use util::id::RoadId;

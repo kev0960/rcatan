@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rcatan::{
     Action, Building, DevCard, Engine, FullState, Phase, PlayerId, Resource,
-    State, TileType, port_at_node,
+    ROAD_TO_NODES, State, TileType, port_at_node,
 };
 
 // Action space layout (300 total):
@@ -340,6 +340,20 @@ impl PyEngine {
 
     #[classattr]
     const NUM_ACTIONS: usize = NUM_ACTIONS;
+
+    /// The two node ids at the ends of each road, as ndarray (72, 2) i64,
+    /// indexed by road id. Fixed across games; it is the board graph's edge
+    /// list for graph networks.
+    #[staticmethod]
+    fn road_endpoints<'py>(py: Python<'py>) -> Bound<'py, PyArray2<i64>> {
+        let flat: Vec<i64> = ROAD_TO_NODES
+            .iter()
+            .flat_map(|[a, b]| [u8::from(*a) as i64, u8::from(*b) as i64])
+            .collect();
+        Array2::from_shape_vec((72, 2), flat)
+            .expect("72 roads with 2 endpoints each")
+            .into_pyarray(py)
+    }
 
     fn state<'py>(
         &self,

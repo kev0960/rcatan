@@ -299,3 +299,20 @@ fn get_overlap_node(left: &[NodeId; 2], right: &[NodeId; 2]) -> NodeId {
         *l_2
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_road_joins_two_distinct_nodes_once() {
+        let mut seen = HashSet::new();
+        for [a, b] in *ROAD_TO_NODES {
+            assert_ne!(a, b);
+            let (lo, hi) = (u8::from(a).min(u8::from(b)), u8::from(a).max(u8::from(b)));
+            assert!(lo < 54 && hi < 54);
+            assert!(seen.insert((lo, hi)), "duplicate road {lo}-{hi}");
+        }
+        assert_eq!(seen.len(), 72);
+    }
+}

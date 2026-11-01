@@ -30,6 +30,7 @@ dev-dependencies = [
     "maturin",
     "pytest>=9.0.3",
     "pytest-watcher>=0.6.3",
+    "torch-geometric>=2.8.0",
 ]
 reinstall-package = ["catan-engine"]
 

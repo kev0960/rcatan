@@ -3,10 +3,12 @@ from pathlib import Path
 import numpy as np
 import torch
 from catan_engine import Engine
+from torch import nn
 from torch.distributions import Categorical
 from tqdm import tqdm
 
 from train.network_ff import FeedForwardNN
+from train.network_graph import GraphActor, GraphCritic
 
 SEED = 42
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -16,24 +18,72 @@ EPSILON = 0.2
 ACTOR_INPUT_SIZE = 2016
 ACTOR_OUTPUT_SIZE = 300
 
+# Network architectures for actor and critic: "graph" or "ff" (feed-forward).
+NETWORKS = ("graph", "ff")
+DEFAULT_NETWORK = "graph"
 
-def load_actor(path: str | Path, device: str | torch.device = DEVICE) -> FeedForwardNN:
-    """Load a trained actor from `path` for inference (sets eval mode)."""
-    actor = FeedForwardNN(input_size=ACTOR_INPUT_SIZE, output_size=ACTOR_OUTPUT_SIZE)
-    actor.load_state_dict(torch.load(path, map_location=device))
+
+def build_actor(network: str) -> nn.Module:
+    if network == "graph":
+        return GraphActor(torch.from_numpy(Engine.road_endpoints()))
+    if network == "ff":
+        return FeedForwardNN(input_size=ACTOR_INPUT_SIZE, output_size=ACTOR_OUTPUT_SIZE)
+    raise ValueError(f"unknown network: {network!r} (expected 'graph' or 'ff')")
+
+
+def build_critic(network: str) -> nn.Module:
+    if network == "graph":
+        return GraphCritic(torch.from_numpy(Engine.road_endpoints()))
+    if network == "ff":
+        return FeedForwardNN(input_size=ACTOR_INPUT_SIZE, output_size=1)
+    raise ValueError(f"unknown network: {network!r} (expected 'graph' or 'ff')")
+
+
+def load_actor(path: str | Path, device: str | torch.device = DEVICE) -> nn.Module:
+    """Load a trained actor from `path` for inference (sets eval mode).
+
+    Checkpoints record their network and state size. Older checkpoints are a
+    bare feed-forward state dict. Raises ValueError if the checkpoint was
+    trained on a different state size than the engine now produces."""
+    checkpoint = torch.load(path, map_location=device, weights_only=True)
+    if "state_dict" in checkpoint:
+        network = checkpoint["network"]
+        state_len = checkpoint["state_len"]
+        state_dict = checkpoint["state_dict"]
+    else:
+        network, state_dict = "ff", checkpoint
+        state_len = state_dict["fc1.weight"].shape[1]
+
+    if state_len != ACTOR_INPUT_SIZE:
+        raise ValueError(
+            f"{path} was trained on a {state_len}-float state, but the engine "
+            f"now produces {ACTOR_INPUT_SIZE}; retrain it"
+        )
+
+    actor = build_actor(network)
+    actor.load_state_dict(state_dict)
     actor.to(device)
     actor.eval()
     return actor
 
 
 class PPO:
-    def __init__(self, batch_size: int):
-        self.actor = FeedForwardNN(
-            input_size=ACTOR_INPUT_SIZE, output_size=ACTOR_OUTPUT_SIZE
-        ).to(DEVICE)
-        self.critic = FeedForwardNN(input_size=ACTOR_INPUT_SIZE, output_size=1).to(
-            DEVICE
-        )
+    def __init__(
+        self, batch_size: int, network: str = DEFAULT_NETWORK, compile: bool = False
+    ):
+        self.network = network
+        self.actor = build_actor(network).to(DEVICE)
+        self.critic = build_critic(network).to(DEVICE)
+        # Compiled wrappers share parameters with the modules above; collection
+        # and training run through them. Checkpoints and validation use the
+        # plain modules, so saved state dicts keep their usual key names.
+        # dynamic=True: collection, mini-batches and the last partial
+        # mini-batch all have different batch sizes.
+        if compile:
+            self._actor = torch.compile(self.actor, dynamic=True)
+            self._critic = torch.compile(self.critic, dynamic=True)
+        else:
+            self._actor, self._critic = self.actor, self.critic
         self.engine = Engine(batch_size=batch_size, seed=SEED)
 
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
@@ -49,9 +99,17 @@ class PPO:
         self.buf_masks = []
 
     def save_actor(self, path: str | Path) -> None:
-        """Persist the actor's weights to `path` (parent dirs created if needed)."""
+        """Persist the actor's weights to `path` (parent dirs created if needed),
+        along with its network and state size so `load_actor` can rebuild it."""
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        torch.save(self.actor.state_dict(), path)
+        torch.save(
+            {
+                "network": self.network,
+                "state_len": ACTOR_INPUT_SIZE,
+                "state_dict": self.actor.state_dict(),
+            },
+            path,
+        )
 
     def observe(self, steps: int):
         for step in tqdm(range(steps), desc="observe", leave=False):
@@ -119,7 +177,7 @@ class PPO:
                 mb_advantages = flat_advantages[idx]
 
                 # Computing the pi_theta (a_t | s_t) on the updated actor
-                logits = self.actor(mb_states)
+                logits = self._actor(mb_states)
                 logits[~mb_mask] = -float("inf")
                 dist = Categorical(logits=logits)
                 logp_new = dist.log_prob(mb_actions)
@@ -135,7 +193,7 @@ class PPO:
 
                 # Value function fitting.
                 critic_loss = (
-                    (self.critic(mb_states).squeeze(-1) - mb_returns) ** 2
+                    (self._critic(mb_states).squeeze(-1) - mb_returns) ** 2
                 ).mean()
 
                 entropy = dist.entropy().mean()
@@ -372,7 +430,7 @@ class PPO:
     def _play_eval(
         self,
         num_matches: int,
-        opponent_actor: FeedForwardNN | None,
+        opponent_actor: nn.Module | None,
         desc: str,
     ) -> dict[str, float]:
         """Play `num_matches` games with the trained actor at a randomized
@@ -462,11 +520,17 @@ class PPO:
         num_matches_checkpoint: int = 200,
         checkpoint_dir: str | Path = "checkpoints",
         checkpoint_step: int = 10,
+        baseline_checkpoint: str | Path | None = None,
     ) -> dict[str, float]:
         """Validate the trained actor against a random agent and past
         checkpoints at 90%, 75%, and 50% of `current_iter` (each floored to a
         multiple of `checkpoint_step`). Plays `num_matches_random` against the
         random agent and `num_matches_checkpoint` per checkpoint opponent.
+
+        If `baseline_checkpoint` is given, also plays `num_matches_checkpoint`
+        games against it (one trained seat vs three baseline seats, so parity
+        is a 25% win rate). This compares runs, e.g. graph vs feed-forward;
+        the other numbers only compare a run with itself. NaN if not given.
 
         Results are cached by target iter so duplicates aren't re-run:
         percentages that floor to the same checkpoint share a single eval.
@@ -521,6 +585,21 @@ class PPO:
             out[f"avg_vp_vs_{label}"] = metrics["avg_vp"]
             out[f"avg_opp_vp_vs_{label}"] = metrics["avg_opp_vp"]
 
+        if baseline_checkpoint is not None:
+            metrics = self._play_eval(
+                num_matches_checkpoint,
+                opponent_actor=load_actor(baseline_checkpoint, DEVICE),
+                desc="validate vs baseline",
+            )
+        else:
+            metrics = dict.fromkeys(
+                ("win_rate", "avg_steps", "avg_vp", "avg_opp_vp"), float("nan")
+            )
+        out["win_rate_vs_baseline"] = metrics["win_rate"]
+        out["avg_steps_vs_baseline"] = metrics["avg_steps"]
+        out["avg_vp_vs_baseline"] = metrics["avg_vp"]
+        out["avg_opp_vp_vs_baseline"] = metrics["avg_opp_vp"]
+
         return out
 
     def step(self):
@@ -530,7 +609,7 @@ class PPO:
         masks = torch.from_numpy(self.engine.get_action_mask()).bool().to(DEVICE)
 
         state_tensor = torch.from_numpy(states).float().to(DEVICE)
-        logits = self.actor.forward(state_tensor)
+        logits = self._actor(state_tensor)
 
         # Set invalid actions to -inf.
         logits[~masks] = -float("inf")
@@ -540,7 +619,7 @@ class PPO:
         actions = dist.sample()
         log_probs = dist.log_prob(actions)
 
-        value = self.critic.forward(state_tensor)
+        value = self._critic(state_tensor)
 
         rewards, game_ended_mask, _ = self.engine.step(actions.cpu().numpy())
 
