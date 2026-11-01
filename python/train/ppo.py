@@ -67,6 +67,110 @@ def load_actor(path: str | Path, device: str | torch.device = DEVICE) -> nn.Modu
     return actor
 
 
+def play_matches(
+    actor: nn.Module,
+    opponent_actor: nn.Module | None,
+    num_matches: int,
+    desc: str,
+    seed: int = SEED + 10_000,
+    num_seats: int = 1,
+) -> dict[str, float]:
+    """Play `num_matches` games with `actor` in `num_seats` randomized
+    seats. Other seats are filled by `opponent_actor` (argmax) if provided,
+    otherwise by a uniform-random agent over valid actions. Both actors'
+    train/eval modes are restored afterwards.
+
+    A match counts as a win if any of `actor`'s seats wins. `avg_vp` and
+    `avg_opp_vp` are per-seat averages."""
+    if not 1 <= num_seats <= 3:
+        raise ValueError(f"num_seats must be 1..3, got {num_seats}")
+    engine = Engine(batch_size=num_matches, seed=seed)
+    rng = np.random.default_rng(seed + 1)
+    # trained_seats[b, p]: seat p of match b is played by `actor`.
+    seat_order = rng.permuted(np.tile(np.arange(4), (num_matches, 1)), axis=1)
+    trained_seats = np.zeros((num_matches, 4), dtype=bool)
+    np.put_along_axis(trained_seats, seat_order[:, :num_seats], True, axis=1)
+    batch_idx = np.arange(num_matches)
+
+    wins = 0
+    finished = 0
+    total_steps = 0
+    total_vp = 0
+    total_opp_vp = 0
+    steps_since_start = np.zeros(num_matches, dtype=np.int64)
+
+    def argmax_actions(actor, states_np, masks_np, idx):
+        state_tensor = torch.tensor(states_np[idx]).float().to(DEVICE)
+        logits = actor(state_tensor)
+        mask_tensor = torch.tensor(masks_np[idx]).bool().to(DEVICE)
+        logits[~mask_tensor] = -float("inf")
+        return torch.argmax(logits, dim=-1).cpu().numpy()
+
+    was_training = actor.training
+    opp_was_training = opponent_actor is not None and opponent_actor.training
+    actor.eval()
+    if opponent_actor is not None:
+        opponent_actor.eval()
+    try:
+        with (
+            torch.no_grad(),
+            tqdm(total=num_matches, desc=desc, leave=False) as pbar,
+        ):
+            while finished < num_matches:
+                states, players = engine.state()
+                masks = engine.get_action_mask()
+
+                actions = np.zeros(num_matches, dtype=np.int64)
+
+                is_trained = trained_seats[batch_idx, players]
+                trained_idx = np.where(is_trained)[0]
+                if trained_idx.size > 0:
+                    actions[trained_idx] = argmax_actions(
+                        actor, states, masks, trained_idx
+                    )
+
+                opp_idx = np.where(~is_trained)[0]
+                if opp_idx.size > 0:
+                    if opponent_actor is None:
+                        for i in opp_idx:
+                            valid = np.flatnonzero(masks[i])
+                            actions[i] = rng.choice(valid)
+                    else:
+                        actions[opp_idx] = argmax_actions(
+                            opponent_actor, states, masks, opp_idx
+                        )
+
+                rewards, ended_mask, final_vps = engine.step(actions.tolist())
+                steps_since_start += 1
+
+                for i in range(len(ended_mask)):
+                    if not ended_mask[i]:
+                        continue
+                    if finished < num_matches:
+                        mine = trained_seats[i]
+                        if any(rewards[i][s] > 0 for s in np.flatnonzero(mine)):
+                            wins += 1
+                        total_vp += int(final_vps[i][mine].sum())
+                        total_opp_vp += int(final_vps[i][~mine].sum())
+                        total_steps += int(steps_since_start[i])
+                        finished += 1
+                        pbar.update(1)
+                    steps_since_start[i] = 0
+    finally:
+        actor.train(was_training)
+        if opponent_actor is not None:
+            opponent_actor.train(opp_was_training)
+
+    return {
+        "win_rate": wins / finished if finished > 0 else 0.0,
+        "avg_steps": total_steps / finished if finished > 0 else 0.0,
+        "avg_vp": total_vp / (finished * num_seats) if finished > 0 else 0.0,
+        "avg_opp_vp": (
+            total_opp_vp / (finished * (4 - num_seats)) if finished > 0 else 0.0
+        ),
+    }
+
+
 class PPO:
     def __init__(
         self, batch_size: int, network: str = DEFAULT_NETWORK, compile: bool = False
@@ -433,85 +537,7 @@ class PPO:
         opponent_actor: nn.Module | None,
         desc: str,
     ) -> dict[str, float]:
-        """Play `num_matches` games with the trained actor at a randomized
-        seat. Other seats are filled by `opponent_actor` (argmax) if provided,
-        otherwise by a uniform-random agent over valid actions."""
-        engine = Engine(batch_size=num_matches, seed=SEED + 10_000)
-        rng = np.random.default_rng(SEED + 10_001)
-        trained_seats = rng.integers(0, 4, size=num_matches, dtype=np.int64)
-
-        wins = 0
-        finished = 0
-        total_steps = 0
-        total_vp = 0
-        total_opp_vp = 0
-        steps_since_start = np.zeros(num_matches, dtype=np.int64)
-
-        def argmax_actions(actor, states_np, masks_np, idx):
-            state_tensor = torch.tensor(states_np[idx]).float().to(DEVICE)
-            logits = actor(state_tensor)
-            mask_tensor = torch.tensor(masks_np[idx]).bool().to(DEVICE)
-            logits[~mask_tensor] = -float("inf")
-            return torch.argmax(logits, dim=-1).cpu().numpy()
-
-        self.actor.eval()
-        if opponent_actor is not None:
-            opponent_actor.eval()
-        try:
-            with (
-                torch.no_grad(),
-                tqdm(total=num_matches, desc=desc, leave=False) as pbar,
-            ):
-                while finished < num_matches:
-                    states, players = engine.state()
-                    masks = engine.get_action_mask()
-
-                    actions = np.zeros(num_matches, dtype=np.int64)
-
-                    trained_idx = np.where(players == trained_seats)[0]
-                    if trained_idx.size > 0:
-                        actions[trained_idx] = argmax_actions(
-                            self.actor, states, masks, trained_idx
-                        )
-
-                    opp_idx = np.where(players != trained_seats)[0]
-                    if opp_idx.size > 0:
-                        if opponent_actor is None:
-                            for i in opp_idx:
-                                valid = np.flatnonzero(masks[i])
-                                actions[i] = rng.choice(valid)
-                        else:
-                            actions[opp_idx] = argmax_actions(
-                                opponent_actor, states, masks, opp_idx
-                            )
-
-                    rewards, ended_mask, final_vps = engine.step(actions.tolist())
-                    steps_since_start += 1
-
-                    for i in range(len(ended_mask)):
-                        if not ended_mask[i]:
-                            continue
-                        if finished < num_matches:
-                            seat = int(trained_seats[i])
-                            if rewards[i][seat] > 0:
-                                wins += 1
-                            total_vp += int(final_vps[i, seat])
-                            total_opp_vp += int(final_vps[i].sum()) - int(
-                                final_vps[i, seat]
-                            )
-                            total_steps += int(steps_since_start[i])
-                            finished += 1
-                            pbar.update(1)
-                        steps_since_start[i] = 0
-        finally:
-            self.actor.train()
-
-        return {
-            "win_rate": wins / finished if finished > 0 else 0.0,
-            "avg_steps": total_steps / finished if finished > 0 else 0.0,
-            "avg_vp": total_vp / finished if finished > 0 else 0.0,
-            "avg_opp_vp": total_opp_vp / (finished * 3) if finished > 0 else 0.0,
-        }
+        return play_matches(self.actor, opponent_actor, num_matches, desc)
 
     def validate(
         self,
