@@ -47,3 +47,32 @@ export async function postAction(
   });
   return unwrap<GameView>(res);
 }
+
+export interface TrainingRunSummary {
+  name: string;
+  timestamp: string;
+  tag: string | null;
+  has_train: boolean;
+  modified: number;
+}
+
+export interface MetricsTable {
+  columns: string[];
+  rows: Record<string, number | null>[];
+}
+
+export interface TrainingRun {
+  name: string;
+  train: MetricsTable;
+  validation: MetricsTable;
+}
+
+export async function listTrainingRuns(): Promise<TrainingRunSummary[]> {
+  const res = await fetch("/training");
+  return (await unwrap<{ runs: TrainingRunSummary[] }>(res)).runs;
+}
+
+export async function getTrainingRun(name: string): Promise<TrainingRun> {
+  const res = await fetch(`/training/${encodeURIComponent(name)}`);
+  return unwrap<TrainingRun>(res);
+}

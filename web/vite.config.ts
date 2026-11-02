@@ -8,6 +8,7 @@ export default defineConfig({
     proxy: {
       "/games": "http://127.0.0.1:8000",
       "/checkpoints": "http://127.0.0.1:8000",
+      "/training": "http://127.0.0.1:8000",
     },
   },
 });

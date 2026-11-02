@@ -5,6 +5,8 @@ incompatibility (pydantic 2.13.3 fails to evaluate `EmailStr | None` on 3.14).
 
 Endpoints:
   GET  /checkpoints            - list available checkpoint runs (newest first)
+  GET  /training               - list training runs from logs/validation-<run>.csv
+  GET  /training/{name}        - train + validation metrics for one run
   POST /games                  - start a new game
                                  (body: {"human_seat"?, "seed"?, "checkpoint"?})
   GET  /games/{game_id}        - current snapshot (no state mutation)
@@ -14,9 +16,12 @@ Endpoints:
 
 from __future__ import annotations
 
+import csv
 import json
+import math
 import os
 import random
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -78,6 +83,61 @@ def resolve_checkpoint(run: str | None) -> Path | None:
         return CHECKPOINT_ROOT / runs[0] / LATEST_FILENAME
     legacy = CHECKPOINT_ROOT / LATEST_FILENAME
     return legacy if legacy.exists() else None
+
+
+# Training logs written by `uv run -m train`: `logs/validation-<run>.csv` and
+# its sibling `logs/train-<run>.csv`, where `<run>` is `%Y%m%d-%H%M%S` with an
+# optional `-<tag>` suffix (e.g. `-graph-gae0.95`). Files that don't follow
+# this pattern (e.g. legacy `validation.csv`) are ignored.
+LOG_ROOT = Path(os.environ.get("CATAN_LOG_DIR", "logs"))
+_VALIDATION_RE = re.compile(r"^validation-(\d{8}-\d{6})(?:-([A-Za-z0-9_.\-]+))?\.csv$")
+
+
+def list_training_runs(root: Path | None = None) -> list[dict[str, Any]]:
+    """Training runs discovered from `validation-<run>.csv` files, newest first."""
+    root = root if root is not None else LOG_ROOT
+    if not root.is_dir():
+        return []
+    runs = []
+    for p in root.iterdir():
+        m = _VALIDATION_RE.match(p.name)
+        if not m or not p.is_file():
+            continue
+        name = p.name[len("validation-") : -len(".csv")]
+        runs.append(
+            {
+                "name": name,
+                "timestamp": m.group(1),
+                "tag": m.group(2),
+                "has_train": (root / f"train-{name}.csv").is_file(),
+                "modified": p.stat().st_mtime,
+            }
+        )
+    runs.sort(key=lambda r: r["name"], reverse=True)
+    return runs
+
+
+def _read_metrics_csv(path: Path) -> dict[str, Any]:
+    """Parse a numeric metrics CSV into `{"columns": [...], "rows": [{...}]}`.
+    Non-finite / unparseable cells become None so the result is valid JSON."""
+    if not path.is_file():
+        return {"columns": [], "rows": []}
+    with path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        columns = list(reader.fieldnames or [])
+        rows = []
+        for raw in reader:
+            row: dict[str, float | None] = {}
+            for k, v in raw.items():
+                if k is None:
+                    continue
+                try:
+                    x = float(v) if v not in (None, "") else math.nan
+                except ValueError:
+                    x = math.nan
+                row[k] = x if math.isfinite(x) else None
+            rows.append(row)
+    return {"columns": columns, "rows": rows}
 
 
 def _load_bot(run: str | None = None) -> Bot | RandomBot:
@@ -230,7 +290,25 @@ def create_app() -> Starlette:
             sessions.pop(request.path_params["game_id"], None)
         return JSONResponse({"ok": True})
 
+    async def list_training(request: Request) -> JSONResponse:
+        return JSONResponse({"runs": list_training_runs()})
+
+    async def get_training(request: Request) -> JSONResponse:
+        name = request.path_params["name"]
+        # Only serve runs from the discovered listing (also blocks path traversal).
+        if name not in {r["name"] for r in list_training_runs()}:
+            return _err(404, f"unknown training run: {name}")
+        return JSONResponse(
+            {
+                "name": name,
+                "train": _read_metrics_csv(LOG_ROOT / f"train-{name}.csv"),
+                "validation": _read_metrics_csv(LOG_ROOT / f"validation-{name}.csv"),
+            }
+        )
+
     routes = [
+        Route("/training", list_training, methods=["GET"]),
+        Route("/training/{name}", get_training, methods=["GET"]),
         Route("/checkpoints", list_checkpoints, methods=["GET"]),
         Route("/games", new_game, methods=["POST"]),
         Route("/games/{game_id}", get_game, methods=["GET"]),

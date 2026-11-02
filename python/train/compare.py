@@ -1,10 +1,12 @@
-"""Head-to-head win rate between the latest graph and feed-forward actors.
+"""Head-to-head win rate between two actor checkpoints.
 
-Usage: python -m train.compare [--graph PATH] [--ff PATH] [--matches N]
+Usage: python -m train.compare [A] [B] [--matches N]
 
-Without paths, picks the newest `checkpoints/<run>/actor_latest.pt` of each
-network that still matches the engine's state size. Plays 1 graph vs 3 ff
-and 1 ff vs 3 graph (parity 25%), then 2 graph vs 2 ff (parity 50%).
+A and B are each a run name under `checkpoints/` (e.g. 20261101-125508), a
+run directory, or an actor `.pt` file; a run uses its `actor_latest.pt`.
+Without them, A is the newest graph run and B the newest feed-forward run
+that still match the engine's state size. Plays 1 A vs 3 B and 1 B vs 3 A
+(parity 25%), then 2 A vs 2 B (parity 50%).
 """
 
 import argparse
@@ -16,6 +18,7 @@ import torch
 from train.ppo import ACTOR_INPUT_SIZE, DEVICE, play_matches
 
 CHECKPOINT_ROOT = Path("checkpoints")
+LATEST = "actor_latest.pt"
 
 
 def checkpoint_network(path: Path) -> tuple[str, int]:
@@ -29,7 +32,7 @@ def checkpoint_network(path: Path) -> tuple[str, int]:
 def latest_checkpoint(network: str, root: Path = CHECKPOINT_ROOT) -> Path:
     """Newest run (run dirs are timestamps) whose latest actor is `network`
     and was trained on the current state size."""
-    for path in sorted(root.glob("*/actor_latest.pt"), reverse=True):
+    for path in sorted(root.glob(f"*/{LATEST}"), reverse=True):
         net, state_len = checkpoint_network(path)
         if net == network and state_len == ACTOR_INPUT_SIZE:
             return path
@@ -38,14 +41,40 @@ def latest_checkpoint(network: str, root: Path = CHECKPOINT_ROOT) -> Path:
     )
 
 
+def resolve_checkpoint(arg: str, root: Path = CHECKPOINT_ROOT) -> Path:
+    """Actor file for a run name, run directory or `.pt` path."""
+    path = Path(arg)
+    if path.is_file():
+        return path
+    for run_dir in (path, root / arg):
+        if (run_dir / LATEST).is_file():
+            return run_dir / LATEST
+    raise FileNotFoundError(f"no {LATEST} for {arg!r} (looked in {path}, {root / arg})")
+
+
+def describe(path: Path) -> str:
+    """Short label, e.g. "20261101-125508 (graph)" or "actor_iter_100.pt (ff)"."""
+    network, _ = checkpoint_network(path)
+    name = path.parent.name if path.name == LATEST else path.name
+    return f"{name} ({network})"
+
+
 def ci95(p: float, n: int) -> float:
     return 1.96 * math.sqrt(p * (1 - p) / n) if n > 0 else float("nan")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m train.compare")
-    parser.add_argument("--graph", type=Path, help="graph actor checkpoint")
-    parser.add_argument("--ff", type=Path, help="feed-forward actor checkpoint")
+    parser.add_argument(
+        "a",
+        nargs="?",
+        help="run name, run directory or actor .pt (default: newest graph run)",
+    )
+    parser.add_argument(
+        "b",
+        nargs="?",
+        help="run name, run directory or actor .pt (default: newest ff run)",
+    )
     parser.add_argument(
         "--matches", type=int, default=500, help="games per matchup"
     )
@@ -55,22 +84,22 @@ def main() -> None:
     from train.ppo import load_actor
 
     paths = {
-        "graph": args.graph or latest_checkpoint("graph"),
-        "ff": args.ff or latest_checkpoint("ff"),
+        "A": resolve_checkpoint(args.a) if args.a else latest_checkpoint("graph"),
+        "B": resolve_checkpoint(args.b) if args.b else latest_checkpoint("ff"),
     }
     actors = {name: load_actor(path, DEVICE) for name, path in paths.items()}
     for name, path in paths.items():
-        print(f"{name:>5}: {path}")
+        print(f"{name}: {describe(path)}  [{path}]")
     print(f"{args.matches} games per matchup\n")
 
-    for me, opp, n in (("graph", "ff", 1), ("ff", "graph", 1), ("graph", "ff", 2)):
+    for me, opp, n in (("A", "B", 1), ("B", "A", 1), ("A", "B", 2)):
         label = f"{n} {me} vs {4 - n} {opp}"
         m = play_matches(
             actors[me], actors[opp], args.matches, desc=label, num_seats=n
         )
         wr = m["win_rate"]
         print(
-            f"{label:<16}: win {wr:6.1%} ± {ci95(wr, args.matches):.1%}"
+            f"{label:<10}: win {wr:6.1%} ± {ci95(wr, args.matches):.1%}"
             f" (parity {n / 4:.0%})"
             f"  | vp/seat {m['avg_vp']:.2f} vs {m['avg_opp_vp']:.2f}"
             f"  | steps {m['avg_steps']:.0f}"

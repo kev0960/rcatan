@@ -14,6 +14,16 @@ SEED = 42
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DISCOUNT_FACTOR = 0.996
 EPSILON = 0.2
+GAE_LAMBDA = 0.95
+
+# How advantages and critic targets are computed: "gae" (GAE(lambda), see
+# `compute_gae`) or "mc" (Monte Carlo discounted returns).
+ADVANTAGES = ("gae", "mc")
+DEFAULT_ADVANTAGE = "gae"
+
+# Actor, critic and optimizer state saved in each run's checkpoint dir so
+# training can resume; see `PPO.save_training_state`.
+TRAINING_STATE = "train_latest.pt"
 
 ACTOR_INPUT_SIZE = 2016
 ACTOR_OUTPUT_SIZE = 300
@@ -171,11 +181,45 @@ def play_matches(
     }
 
 
+def find_resume_checkpoint(run_dir: str | Path) -> tuple[Path, str]:
+    """Checkpoint to resume `run_dir` from, and the network it was trained
+    with. Prefers the full training state; runs saved before it existed fall
+    back to their newest `actor_iter_N.pt` (actor only)."""
+    run_dir = Path(run_dir)
+    path = run_dir / TRAINING_STATE
+    if not path.is_file():
+        actors = sorted(
+            run_dir.glob("actor_iter_*.pt"), key=lambda p: _checkpoint_iter(p)
+        )
+        if not actors:
+            raise FileNotFoundError(
+                f"no {TRAINING_STATE} or actor_iter_*.pt in {run_dir}"
+            )
+        path = actors[-1]
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    network = checkpoint["network"] if "network" in checkpoint else "ff"
+    return path, network
+
+
+def _checkpoint_iter(path: Path) -> int:
+    """N from `actor_iter_N.pt`."""
+    return int(path.stem.rsplit("_", 1)[1])
+
+
 class PPO:
     def __init__(
-        self, batch_size: int, network: str = DEFAULT_NETWORK, compile: bool = False
+        self,
+        batch_size: int,
+        network: str = DEFAULT_NETWORK,
+        compile: bool = False,
+        advantage: str = DEFAULT_ADVANTAGE,
+        gae_lambda: float = GAE_LAMBDA,
     ):
+        if advantage not in ADVANTAGES:
+            raise ValueError(f"unknown advantage: {advantage!r} (expected {ADVANTAGES})")
         self.network = network
+        self.advantage = advantage
+        self.gae_lambda = gae_lambda
         self.actor = build_actor(network).to(DEVICE)
         self.critic = build_critic(network).to(DEVICE)
         # Compiled wrappers share parameters with the modules above; collection
@@ -215,6 +259,51 @@ class PPO:
             path,
         )
 
+    def save_training_state(self, path: str | Path, iteration: int) -> None:
+        """Persist everything needed to resume training after `iteration`
+        completed iterations: actor, critic and both optimizers."""
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "network": self.network,
+                "state_len": ACTOR_INPUT_SIZE,
+                "iteration": iteration,
+                "actor": self.actor.state_dict(),
+                "critic": self.critic.state_dict(),
+                "actor_optimizer": self.actor_optimizer.state_dict(),
+                "critic_optimizer": self.critic_optimizer.state_dict(),
+            },
+            path,
+        )
+
+    def load_checkpoint(self, path: str | Path) -> tuple[int, bool]:
+        """Load a training state or an actor checkpoint from `path`. Returns
+        (completed iterations, whether the critic was restored). An actor
+        checkpoint only restores the actor; the critic and optimizers start
+        fresh and the iteration comes from its `actor_iter_N.pt` name."""
+        path = Path(path)
+        checkpoint = torch.load(path, map_location=DEVICE, weights_only=True)
+        if checkpoint.get("network", "ff") != self.network:
+            raise ValueError(
+                f"{path} is a {checkpoint.get('network', 'ff')} checkpoint, "
+                f"but this run uses {self.network}"
+            )
+        if checkpoint.get("state_len", ACTOR_INPUT_SIZE) != ACTOR_INPUT_SIZE:
+            raise ValueError(
+                f"{path} was trained on a {checkpoint['state_len']}-float "
+                f"state, but the engine now produces {ACTOR_INPUT_SIZE}"
+            )
+
+        if "critic" in checkpoint:
+            self.actor.load_state_dict(checkpoint["actor"])
+            self.critic.load_state_dict(checkpoint["critic"])
+            self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
+            self.critic_optimizer.load_state_dict(checkpoint["critic_optimizer"])
+            return checkpoint["iteration"], True
+
+        self.actor.load_state_dict(checkpoint.get("state_dict", checkpoint))
+        return _checkpoint_iter(path), False
+
     def observe(self, steps: int):
         for step in tqdm(range(steps), desc="observe", leave=False):
             (
@@ -238,17 +327,35 @@ class PPO:
             self.buf_masks.append(masks)
 
     def train(self, mini_batch_size: int):
-        returns = torch.from_numpy(self.compute_discounted_rewards()).to(DEVICE)
-
         # stack(values) is (T, B, 1)
         values = torch.stack(self.buf_values).squeeze(-1).to(DEVICE)
 
-        # How much of the return variance the critic explained, using the
-        # values predicted while collecting (before training on this batch).
-        # 1 = perfect, 0 = no better than predicting the mean.
-        explained_var = 1 - (returns - values).var() / (returns.var() + 1e-8)
+        # Monte Carlo discounted returns: what actually happened.
+        mc_returns = torch.from_numpy(self.compute_discounted_rewards()).to(DEVICE)
 
-        advantages = returns - values
+        # `returns` are the critic's targets: lambda-returns for GAE, discounted
+        # returns for Monte Carlo.
+        if self.advantage == "gae":
+            advantages, returns = self.compute_gae(
+                values.cpu().numpy(), self.gae_lambda
+            )
+            advantages = torch.from_numpy(advantages).to(DEVICE)
+            returns = torch.from_numpy(returns).to(DEVICE)
+        else:
+            returns = mc_returns
+            advantages = returns - values
+
+        # How much of the target variance the critic explained, using the
+        # values predicted while collecting (before training on this batch).
+        # 1 = perfect, 0 = no better than predicting the mean. GAE targets are
+        # built partly from the critic's own values, so against them this
+        # flatters the critic and is not comparable across the two modes.
+        explained_var = 1 - (returns - values).var() / (returns.var() + 1e-8)
+        # The same against the Monte Carlo returns, which the critic cannot
+        # influence: comparable across modes and runs. Equal to explained_var
+        # in Monte Carlo mode.
+        explained_var_mc = 1 - (mc_returns - values).var() / (mc_returns.var() + 1e-8)
+
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         flat_states = torch.stack(self.buf_states).flatten(0, 1)
@@ -346,6 +453,7 @@ class PPO:
             "value_mean": values.mean().item(),
             "value_std": values.std().item(),
             "explained_var": explained_var.item(),
+            "explained_var_mc": explained_var_mc.item(),
             "approx_kl": sum_approx_kl / n_updates,
             "clip_frac": sum_clip_frac / n_updates,
         }
@@ -531,6 +639,77 @@ class PPO:
 
         return actual_rewards_for_steps
 
+    def compute_gae(
+        self, values: np.ndarray, gae_lambda: float = GAE_LAMBDA
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Generalized Advantage Estimation over the buffer.
+
+        Args:
+            values: (T, B) critic values V(s) recorded during collection, each
+                from the perspective of the player acting at that step.
+            gae_lambda: 0 = one-step TD, 1 = Monte Carlo returns.
+
+        Returns:
+            advantages (T, B) and critic targets (T, B) = advantages + values.
+
+        Works per (game, player) like `compute_discounted_rewards`: "next"
+        means the same player's next decision, and the reward is everything
+        that happened to that player in between (from `compute_rewards`).
+        Walking backwards, for the player acting at step i:
+
+            delta_i = R_i + gamma * V_next - V_i
+            A_i     = delta_i + gamma * lambda * A_next
+
+        After a game ends the future is worth 0. A game still running when the
+        buffer ends has no next state for its players; the engine only encodes
+        the state for the player to move, so each player's own last value
+        stands in for their next one.
+        """
+        T, B = values.shape
+        rewards = self.compute_rewards()
+        players = np.asarray(self.buf_players)
+        game_ended_mask = np.asarray(self.buf_game_ended_mask, dtype=bool)
+
+        next_value = np.zeros((B, 4), dtype=np.float32)
+        next_advantage = np.zeros((B, 4), dtype=np.float32)
+        # Whether the player has a later decision in the same game.
+        has_next = np.zeros((B, 4), dtype=bool)
+        # Still inside the game that the buffer cut off.
+        unfinished = np.ones((B, 4), dtype=bool)
+
+        advantages = np.zeros((T, B), dtype=np.float32)
+        b_arr = np.arange(B)
+
+        for i in reversed(range(T)):
+            # Step i ended its game: rows after it belong to the next game.
+            ended = game_ended_mask[i]
+            if ended.any():
+                has_next[ended] = False
+                unfinished[ended] = False
+
+            # p = player acting at step i; i' = p's next decision in this game.
+            p = players[i]
+            v = values[i]
+            # V(s_i'): p's value at i' if there is one; otherwise 0 when the
+            # game ended, or p's own V(s_i) when the buffer cut the game off.
+            bootstrap = np.where(unfinished[b_arr, p], v, 0)
+            v_next = np.where(has_next[b_arr, p], next_value[b_arr, p], bootstrap)
+            # A_i': 0 when p has no later decision.
+            a_next = np.where(has_next[b_arr, p], next_advantage[b_arr, p], 0)
+
+            # delta_i = R_i + gamma * V(s_i') - V(s_i)
+            delta = rewards[i] + DISCOUNT_FACTOR * v_next - v
+            # A_i = delta_i + gamma * lambda * A_i'
+            #     = delta_i + (gamma*lambda) delta_i' + (gamma*lambda)^2 delta_i'' + ...
+            advantages[i] = delta + DISCOUNT_FACTOR * gae_lambda * a_next
+
+            # Step i is p's "next" decision for p's earlier steps.
+            next_value[b_arr, p] = v
+            next_advantage[b_arr, p] = advantages[i]
+            has_next[b_arr, p] = True
+
+        return advantages, advantages + values
+
     def _play_eval(
         self,
         num_matches: int,
@@ -549,7 +728,7 @@ class PPO:
         baseline_checkpoint: str | Path | None = None,
     ) -> dict[str, float]:
         """Validate the trained actor against a random agent and past
-        checkpoints at 90%, 75%, and 50% of `current_iter` (each floored to a
+        checkpoints at 75% and 50% of `current_iter` (each floored to a
         multiple of `checkpoint_step`). Plays `num_matches_random` against the
         random agent and `num_matches_checkpoint` per checkpoint opponent.
 
@@ -577,7 +756,7 @@ class PPO:
 
         cache: dict[int, dict[str, float]] = {}
 
-        for pct, label in [(0.9, "90"), (0.75, "75"), (0.5, "50")]:
+        for pct, label in [(0.75, "75"), (0.5, "50")]:
             target_iter = int(pct * current_iter)
             target_iter = (target_iter // checkpoint_step) * checkpoint_step
 
