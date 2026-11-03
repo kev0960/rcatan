@@ -36,6 +36,8 @@ DEFAULT_NETWORK = "graph"
 # the graph network: more passes let it memorize the buffer's games instead of
 # learning values that carry over to new ones.
 ACTOR_PASSES = 4
+# Adam learning rate for the actor and the critic at the start of training.
+LEARNING_RATE = 1e-4
 CRITIC_PASSES = {"graph": 2, "ff": 4}
 
 
@@ -223,16 +225,22 @@ class PPO:
         advantage: str = DEFAULT_ADVANTAGE,
         gae_lambda: float = GAE_LAMBDA,
         critic_passes: int | None = None,
+        actor_passes: int = ACTOR_PASSES,
         actor_layers: int = NUM_LAYERS,
     ):
         if advantage not in ADVANTAGES:
             raise ValueError(f"unknown advantage: {advantage!r} (expected {ADVANTAGES})")
         if critic_passes is None:
-            critic_passes = CRITIC_PASSES[network]
-        if not 1 <= critic_passes <= ACTOR_PASSES:
+            critic_passes = min(CRITIC_PASSES[network], actor_passes)
+        if actor_passes < 1:
+            raise ValueError(f"actor_passes must be at least 1, got {actor_passes}")
+        # The critic trains on the first `critic_passes` of the actor's passes.
+        if not 1 <= critic_passes <= actor_passes:
             raise ValueError(
-                f"critic_passes must be between 1 and {ACTOR_PASSES}, got {critic_passes}"
+                f"critic_passes must be between 1 and actor_passes "
+                f"({actor_passes}), got {critic_passes}"
             )
+        self.actor_passes = actor_passes
         self.critic_passes = critic_passes
         self.network = network
         self.advantage = advantage
@@ -252,8 +260,15 @@ class PPO:
             self._actor, self._critic = self.actor, self.critic
         self.engine = Engine(batch_size=batch_size, seed=SEED)
 
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=1e-4)
+        self.actor_optimizer = torch.optim.Adam(
+            self.actor.parameters(), lr=LEARNING_RATE
+        )
+        self.critic_optimizer = torch.optim.Adam(
+            self.critic.parameters(), lr=LEARNING_RATE
+        )
+
+        # The run's config, saved into every checkpoint (see `train.__main__`).
+        self.config: dict | None = None
 
         self.buf_states = []
         self.buf_players = []
@@ -274,10 +289,21 @@ class PPO:
                 "network": self.network,
                 "num_layers": self.actor_layers,
                 "state_len": ACTOR_INPUT_SIZE,
+                "config": self.config,
                 "state_dict": self.actor.state_dict(),
             },
             path,
         )
+
+    @property
+    def lr(self) -> float:
+        """Current learning rate (the actor's and the critic's are kept equal)."""
+        return self.actor_optimizer.param_groups[0]["lr"]
+
+    def set_lr(self, lr: float) -> None:
+        for optimizer in (self.actor_optimizer, self.critic_optimizer):
+            for group in optimizer.param_groups:
+                group["lr"] = lr
 
     def save_training_state(self, path: str | Path, iteration: int) -> None:
         """Persist everything needed to resume training after `iteration`
@@ -289,6 +315,7 @@ class PPO:
                 "num_layers": self.actor_layers,
                 "state_len": ACTOR_INPUT_SIZE,
                 "iteration": iteration,
+                "config": self.config,
                 "actor": self.actor.state_dict(),
                 "critic": self.critic.state_dict(),
                 "actor_optimizer": self.actor_optimizer.state_dict(),
@@ -403,7 +430,7 @@ class PPO:
         n_updates = 0
         n_critic_updates = 0
 
-        for pass_ in tqdm(range(ACTOR_PASSES), desc="train", leave=False):
+        for pass_ in tqdm(range(self.actor_passes), desc="train", leave=False):
             # The critic only trains on the first `critic_passes` passes.
             train_critic = pass_ < self.critic_passes
             perm = torch.randperm(N)

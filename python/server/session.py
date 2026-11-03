@@ -89,7 +89,7 @@ class GameSession:
         seat = self._current_player()
         was_setup = self._in_setup()
         _, ended, _ = self.engine.step([action_index])
-        decoded = decode_action(action_index)
+        decoded = decode_action(action_index, seat)
         entry: dict[str, Any] = {
             "seq": len(self.history),
             "seat": seat,
@@ -166,10 +166,10 @@ class GameSession:
         if is_human_turn:
             state, mask = self._state_and_mask()
             legal_actions = [
-                decode_action(i) for i, m in enumerate(mask) if m
+                decode_action(i, self.human_seat) for i, m in enumerate(mask) if m
             ]
             top_ai_moves = [
-                {**decode_action(idx), "logit": logit}
+                {**decode_action(idx, self.human_seat), "logit": logit}
                 for idx, logit in self.bot.top_k(state, mask, k=3)
             ]
         return {

@@ -27,8 +27,7 @@ validation load either kind.
 
 `--actor-layers` sets how many attention layers the graph actor has
 (default 3; the critic always has 3). Each layer lets a node see one road
-further across the board. Runs with a non-default count add `-a<layers>` to
-their log names, e.g. `train-<timestamp>-graph-a6-gae0.95.csv`.
+further across the board.
 
 ```sh
 uv run python -m train --actor-layers 6
@@ -84,6 +83,47 @@ optimizer state, and resuming restores all of it. Runs from before
 learn from noisy advantages. The network comes from the checkpoint, and
 `--network` must match it if given. `--advantage` and `--gae-lambda` can
 change between invocations.
+
+The learning rate (actor and critic) is 1e-4 by default and stays there.
+With `--lr-decay linear` it falls linearly over the invocation's
+`--iterations` to 1e-5 (10% of the start), so late updates make smaller,
+less noisy changes to a nearly trained policy:
+
+```sh
+uv run python -m train --lr-decay linear --iterations 300
+```
+
+The training log's `lr` column shows the rate used each iteration. Resuming
+restores the rate where it stopped. With `--lr-decay linear`, a resumed run
+decays from that rate to 1e-5 over its new `--iterations`; without it, it
+stays at the restored rate.
+
+Each iteration collects `--batch-size` games in parallel (default 64) for
+3000 steps, then trains the actor for `--actor-passes` passes over that data
+(default 4) and the critic for `--critic-passes` (default 2 for graph, 4 for
+ff, at most `--actor-passes`). Collecting more games with fewer passes keeps
+the number of updates per iteration the same but uses each sample fewer
+times, which leaves the critic less room to memorize the buffer's games:
+
+```sh
+uv run python -m train --batch-size 128 --actor-passes 2 --critic-passes 1
+```
+
+The buffer lives on the GPU: 64 games use about 6 GB for the graph network,
+128 about twice that.
+
+Each run's settings are in `checkpoints/<timestamp>/config.json`: network,
+layers, advantage, passes, batch size, learning rate and decay, baseline, the
+git commit (and whether it had uncommitted changes), and total iterations.
+Logs are just `logs/train-<timestamp>.csv` and
+`logs/validation-<timestamp>.csv`. Resuming updates `config.json` to the new
+settings and adds an entry to its `resumes` list. Every checkpoint also
+carries the config under `"config"`:
+
+```python
+import torch
+torch.load("checkpoints/<timestamp>/actor_latest.pt", weights_only=True)["config"]
+```
 
 To also play a checkpoint from another run during validation (for example,
 the feed-forward baseline while training the graph network), set

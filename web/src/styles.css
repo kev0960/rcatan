@@ -313,6 +313,19 @@ header h1 { margin: 0; font-size: 22px; }
 .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .smoothing { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #4a5568; margin-top: 12px; }
 .mono { font-family: monospace; }
+.config-json {
+  margin: 0;
+  background: #fff;
+  border: 1px solid #e0e3e8;
+  border-radius: 4px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #222;
+  max-height: 360px;
+  overflow: auto;
+  white-space: pre;
+}
 
 .stat-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .stat {

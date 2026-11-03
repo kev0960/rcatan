@@ -53,6 +53,7 @@ export interface TrainingRunSummary {
   timestamp: string;
   tag: string | null;
   has_train: boolean;
+  has_config: boolean;
   modified: number;
 }
 
@@ -63,6 +64,8 @@ export interface MetricsTable {
 
 export interface TrainingRun {
   name: string;
+  /** checkpoints/<run>/config.json verbatim; null for runs without one. */
+  config: string | null;
   train: MetricsTable;
   validation: MetricsTable;
 }

@@ -6,7 +6,8 @@ incompatibility (pydantic 2.13.3 fails to evaluate `EmailStr | None` on 3.14).
 Endpoints:
   GET  /checkpoints            - list available checkpoint runs (newest first)
   GET  /training               - list training runs from logs/validation-<run>.csv
-  GET  /training/{name}        - train + validation metrics for one run
+  GET  /training/{name}        - train + validation metrics for one run, and
+                                 its checkpoints/<run>/config.json (verbatim)
   POST /games                  - start a new game
                                  (body: {"human_seat"?, "seed"?, "checkpoint"?})
   GET  /games/{game_id}        - current snapshot (no state mutation)
@@ -93,6 +94,19 @@ LOG_ROOT = Path(os.environ.get("CATAN_LOG_DIR", "logs"))
 _VALIDATION_RE = re.compile(r"^validation-(\d{8}-\d{6})(?:-([A-Za-z0-9_.\-]+))?\.csv$")
 
 
+RUN_CONFIG_FILENAME = "config.json"
+
+
+def read_run_config(timestamp: str) -> str | None:
+    """`checkpoints/<timestamp>/config.json` as written by training, verbatim,
+    or None if the run has none (runs from before it existed)."""
+    path = CHECKPOINT_ROOT / timestamp / RUN_CONFIG_FILENAME
+    try:
+        return path.read_text()
+    except OSError:
+        return None
+
+
 def list_training_runs(root: Path | None = None) -> list[dict[str, Any]]:
     """Training runs discovered from `validation-<run>.csv` files, newest first."""
     root = root if root is not None else LOG_ROOT
@@ -110,6 +124,9 @@ def list_training_runs(root: Path | None = None) -> list[dict[str, Any]]:
                 "timestamp": m.group(1),
                 "tag": m.group(2),
                 "has_train": (root / f"train-{name}.csv").is_file(),
+                "has_config": (
+                    CHECKPOINT_ROOT / m.group(1) / RUN_CONFIG_FILENAME
+                ).is_file(),
                 "modified": p.stat().st_mtime,
             }
         )
@@ -296,11 +313,14 @@ def create_app() -> Starlette:
     async def get_training(request: Request) -> JSONResponse:
         name = request.path_params["name"]
         # Only serve runs from the discovered listing (also blocks path traversal).
-        if name not in {r["name"] for r in list_training_runs()}:
+        runs = {r["name"]: r for r in list_training_runs()}
+        if name not in runs:
             return _err(404, f"unknown training run: {name}")
         return JSONResponse(
             {
                 "name": name,
+                # A resumed run's "-fromN" logs share the run's config.
+                "config": read_run_config(runs[name]["timestamp"]),
                 "train": _read_metrics_csv(LOG_ROOT / f"train-{name}.csv"),
                 "validation": _read_metrics_csv(LOG_ROOT / f"validation-{name}.csv"),
             }

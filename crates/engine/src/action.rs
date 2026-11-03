@@ -1,5 +1,5 @@
 use crate::util::id::NodeId;
-use crate::util::id::PlayerId;
+use crate::util::id::RelativePlayerId;
 use crate::util::id::RoadId;
 use crate::util::id::TileId;
 
@@ -64,7 +64,7 @@ pub enum Action {
 
     DiscardResource(Resource),
     MoveRobber(TileId),
-    StealCard(PlayerId),
+    StealCard(RelativePlayerId),
 
     BuyDevCard,
     UseDevCard(DevCard),

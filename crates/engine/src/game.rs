@@ -8,6 +8,7 @@ use crate::reward::VictoryPoint;
 use crate::state::FullState;
 use crate::state::Phase;
 use crate::state::State;
+use crate::util::id::RelativePlayerId;
 use crate::util::vecset::VecSet;
 
 use crate::action::Action;
@@ -323,7 +324,12 @@ impl Game {
                 // one victim; always non-empty.
                 self.compute_robber_victims()
                     .into_iter()
-                    .map(|p| Action::StealCard(PlayerId::from(p)))
+                    .map(|p| {
+                        Action::StealCard(RelativePlayerId::from(
+                            self.current_player_id(),
+                            PlayerId::from(p),
+                        ))
+                    })
                     .collect()
             }
             GameState::InitialBoardSetup(current_order) => {
@@ -539,7 +545,8 @@ impl Game {
                 }
             }
             Action::StealCard(player_id) => {
-                let player = &mut self.players[usize::from(player_id)];
+                let target_player = player_id.to(self.current_player_id());
+                let player = &mut self.players[target_player];
                 if player.num_resource_cards() > 0 {
                     let r = choose_weighted(&player.cards[0..5], &mut self.rng);
                     player.use_resource_card(Resource::ALL[r], 1);
@@ -1361,9 +1368,12 @@ mod tests {
         // --- Phase 3: Steal ---
 
         let actions = game.get_actions();
-        assert_eq!(actions, vec![Action::StealCard(p(2))]);
+        assert_eq!(
+            actions,
+            vec![Action::StealCard(RelativePlayerId::from(p(0), p(2)))]
+        );
 
-        game.run_action(Action::StealCard(p(2)));
+        game.run_action(Action::StealCard(RelativePlayerId::from(p(0), p(2))));
 
         // Player 0 gained one card, player 2 lost one.
         assert_eq!(game.players[0].num_resource_cards(), 1);
@@ -1484,8 +1494,13 @@ mod tests {
         game.run_action(Action::MoveRobber(TileId::from(1usize)));
 
         let actions = game.get_actions();
-        assert_eq!(actions, vec![Action::StealCard(p(1))]);
-        game.run_action(Action::StealCard(p(1)));
+        assert_eq!(
+            actions,
+            vec![Action::StealCard(RelativePlayerId::from(p(0), p(1)))]
+        );
+        game.run_action(Action::StealCard(
+            RelativePlayerId::from(p(0), p(1)),
+        ));
 
         assert_eq!(game.players[0].num_resource_cards(), 1);
         assert_eq!(game.players[1].num_resource_cards(), 0);

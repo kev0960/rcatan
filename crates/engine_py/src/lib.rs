@@ -3,8 +3,8 @@ use numpy::{IntoPyArray, PyArray1, PyArray2};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rcatan::{
-    Action, Building, DevCard, Engine, FullState, Phase, PlayerId, Resource,
-    ROAD_TO_NODES, State, TileType, port_at_node,
+    Action, Building, DevCard, Engine, FullState, Phase, PlayerId,
+    ROAD_TO_NODES, RelativePlayerId, Resource, State, TileType, port_at_node,
 };
 
 // Action space layout (300 total):
@@ -13,7 +13,9 @@ use rcatan::{
 //   [126, 180)  BuildStructure(City, node_id)
 //   [180, 185)  DiscardResource(resource)
 //   [185, 204)  MoveRobber(tile_id)
-//   [204, 208)  StealCard(player_id)
+//   [204, 208)  StealCard(relative_player_id): victim relative to the current
+//               player (1 = next player, ...), the same order the state uses;
+//               204 (the current player) never occurs
 //   [208, 283)  MaritimeTrade  (give_resource * 15 + amount_idx * 5 + want_resource)
 //               amount_idx: 0 = give 2, 1 = give 3, 2 = give 4
 //   283         EndTurn
@@ -63,7 +65,9 @@ fn index_to_action(index: usize) -> Action {
         }
         180..185 => Action::DiscardResource(Resource::ALL[index - 180]),
         185..204 => Action::MoveRobber(((index - 185) as u8).into()),
-        204..208 => Action::StealCard(((index - 204) as u8).into()),
+        204..208 => {
+            Action::StealCard(RelativePlayerId::from_index((index - 204) as u8))
+        }
         208..283 => {
             let offset = index - 208;
             let give_r = Resource::ALL[offset / 15];

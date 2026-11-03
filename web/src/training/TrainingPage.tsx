@@ -306,6 +306,15 @@ function RunDetail({ run }: { run: TrainingRun }) {
       <LatestValidation table={run.validation} />
 
       <section>
+        <h3>Config</h3>
+        {run.config === null ? (
+          <p className="hint">No config.json for this run (trained before it was recorded).</p>
+        ) : (
+          <pre className="config-json">{run.config}</pre>
+        )}
+      </section>
+
+      <section>
         <h3>Validation</h3>
         {valCharts.length === 0 ? (
           <p className="hint">No validation rows yet.</p>

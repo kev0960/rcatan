@@ -6,7 +6,9 @@ Mirrors the layout in `crates/engine_py/src/lib.rs`:
   [126, 180)  build_city(node_id)
   [180, 185)  discard_resource(resource)
   [185, 204)  move_robber(tile_id)
-  [204, 208)  steal_card(player_id)
+  [204, 208)  steal_card(relative_player_id): the victim relative to the
+              acting player (1 = next player, ...); decoded to an absolute
+              seat in `player_id`
   [208, 283)  maritime_trade(give_resource, give_amount, want_resource)
   283         end_turn
   284         buy_dev_card
@@ -63,7 +65,9 @@ class DecodedAction(TypedDict, total=False):
     dev_card: str
 
 
-def decode_action(index: int) -> DecodedAction:
+def decode_action(index: int, current_player: int) -> DecodedAction:
+    """`current_player` is the seat taking the action, needed to turn a
+    steal's relative victim into an absolute seat."""
     if not 0 <= index < NUM_ACTIONS:
         raise ValueError(f"action index out of range: {index}")
 
@@ -107,7 +111,7 @@ def decode_action(index: int) -> DecodedAction:
             "label": f"Move robber to t{tile_id:02d}",
         }
     if index < 208:
-        player_id = index - 204
+        player_id = (current_player + index - 204) % 4
         return {
             "index": index,
             "kind": "steal_card",
