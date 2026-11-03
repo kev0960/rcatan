@@ -20,7 +20,12 @@ export interface StructureOnBoard {
 
 export interface PlayerInfo {
   id: number;
+  // Opponents' hidden VP cards are excluded while the game is running.
   vp: number;
+  public_vp: number;
+  knights_played: number;
+  road_length: number;
+  dev_cards: number;
   cards: {
     brick: number;
     lumber: number;
@@ -46,6 +51,7 @@ export interface FullState {
   phase: Phase;
   phase_data: Record<string, unknown> | null;
   longest_road: { player: number; length: number } | null;
+  largest_army: { player: number; knights: number } | null;
   tiles: Tile[];
   roads: RoadOnBoard[];
   structures: StructureOnBoard[];
@@ -75,6 +81,14 @@ export interface AIActionLog {
   action: DecodedAction;
 }
 
+export interface HistoryEntry {
+  seq: number;
+  seat: number;
+  action: DecodedAction;
+  // Present on synthetic "Rolled N" entries (dice are rolled automatically).
+  dice?: number;
+}
+
 export interface GameView {
   game_id: string;
   human_seat: number;
@@ -85,4 +99,5 @@ export interface GameView {
   legal_actions: DecodedAction[];
   top_ai_moves: DecodedAction[];
   last_ai_actions: AIActionLog[];
+  history?: HistoryEntry[];
 }

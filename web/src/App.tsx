@@ -52,6 +52,36 @@ function PhaseLabel({ view }: { view: GameView }) {
   );
 }
 
+function WinnerBanner({ view }: { view: GameView }) {
+  const winner = view.winner;
+  const youWon = winner !== null && winner === view.human_seat;
+  const p = winner !== null ? view.state.players[winner] : undefined;
+  return (
+    <div className={`winner-banner${youWon ? " you" : ""}`}>
+      <span className="trophy">🏆</span>
+      <div>
+        <div className="winner-title">
+          {winner === null
+            ? "Game over"
+            : youWon
+              ? "You won!"
+              : `P${winner} wins`}
+        </div>
+        {p && (
+          <div className="winner-sub">
+            <span
+              className="dot"
+              style={{ background: PLAYER_COLORS[p.id] }}
+            />
+            P{p.id} reached {p.vp} VP
+            {youWon ? "" : ` · you finished with ${view.state.players[view.human_seat].vp} VP`}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function PlayersPanel({ view }: { view: GameView }) {
   return (
     <div className="players">
@@ -62,19 +92,57 @@ function PlayersPanel({ view }: { view: GameView }) {
           p.cards.ore +
           p.cards.grain +
           p.cards.wool;
-        const isCurrent = view.state.current_player === p.id;
+        const isWinner = view.finished && view.winner === p.id;
+        const isCurrent = !view.finished && view.state.current_player === p.id;
         const isHuman = view.human_seat === p.id;
+        const hasLongestRoad = view.state.longest_road?.player === p.id;
+        const hasLargestArmy = view.state.largest_army?.player === p.id;
+        // VP cards the viewer can see but aren't public (own hand, or
+        // everyone's once the game is over).
+        const hiddenVp = p.vp - (p.public_vp ?? p.vp);
         return (
           <div
             key={p.id}
-            className={`player${isCurrent ? " current" : ""}`}
+            className={`player${isCurrent ? " current" : ""}${isWinner ? " winner" : ""}`}
             style={{ borderLeft: `6px solid ${PLAYER_COLORS[p.id]}` }}
           >
             <div className="player-header">
               <strong>P{p.id}</strong>
               {isHuman && <span className="badge">you</span>}
               {isCurrent && <span className="badge current-badge">turn</span>}
-              <span className="vp">{p.vp} VP</span>
+              {isWinner && <span className="badge winner-badge">🏆 winner</span>}
+              <span
+                className="vp"
+                title={
+                  hiddenVp > 0
+                    ? `${p.public_vp} public + ${hiddenVp} from VP cards`
+                    : undefined
+                }
+              >
+                {p.vp} VP
+                {hiddenVp > 0 && <span className="vp-hidden"> ({hiddenVp}★)</span>}
+              </span>
+            </div>
+            {(hasLongestRoad || hasLargestArmy) && (
+              <div className="awards">
+                {hasLongestRoad && (
+                  <span className="award" title="Longest road: +2 VP">
+                    🛣️ Longest road · {view.state.longest_road!.length}
+                  </span>
+                )}
+                {hasLargestArmy && (
+                  <span className="award" title="Largest army: +2 VP">
+                    ⚔️ Largest army · {view.state.largest_army!.knights}
+                  </span>
+                )}
+              </div>
+            )}
+            <div className="player-stats">
+              <span title="longest continuous road">
+                road {p.road_length ?? 0}
+              </span>
+              <span title="knights played">knights {p.knights_played ?? 0}</span>
+              <span title="development cards held">dev {p.dev_cards ?? 0}</span>
             </div>
             <div className="cards">
               {isHuman ? (
@@ -201,21 +269,71 @@ function TopAiPanel({ view }: { view: GameView }) {
   );
 }
 
-function AiActionLog({ view }: { view: GameView }) {
-  if (view.last_ai_actions.length === 0) return null;
+function ActionHistory({ view }: { view: GameView }) {
+  const { human_seat } = view;
+  if (view.history === undefined) {
+    return (
+      <div className="ai-log">
+        <h4>Action history</h4>
+        <p className="hint">
+          The server didn&apos;t send any history. Restart it to pick up the
+          latest code.
+        </p>
+      </div>
+    );
+  }
+  const history = view.history;
+  if (history.length === 0) {
+    return (
+      <div className="ai-log">
+        <h4>Action history</h4>
+        <p className="hint">No actions yet.</p>
+      </div>
+    );
+  }
+  // Everything after the human's most recent action is "new" since their move.
+  let lastHumanSeq = -1;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const e = history[i];
+    if (e.seat === human_seat && e.action.kind !== "roll_dice") {
+      lastHumanSeq = e.seq;
+      break;
+    }
+  }
   return (
     <div className="ai-log">
-      <h4>Since your last move</h4>
+      <h4>Action history ({history.length})</h4>
       <ul>
-        {view.last_ai_actions.map((entry, i) => (
-          <li key={i}>
-            <span
-              className="dot"
-              style={{ background: PLAYER_COLORS[entry.seat] }}
-            />
-            P{entry.seat}: {entry.action.label}
-          </li>
-        ))}
+        {[...history].reverse().map((entry) => {
+          const isRoll = entry.dice !== undefined;
+          const classes = [
+            entry.seq > lastHumanSeq ? "new" : "",
+            entry.seat === human_seat ? "mine" : "",
+            isRoll ? "roll" : "",
+          ]
+            .filter(Boolean)
+            .join(" ");
+          return (
+            <li key={entry.seq} className={classes}>
+              <span className="seq">{entry.seq + 1}</span>
+              <span
+                className="dot"
+                style={{ background: PLAYER_COLORS[entry.seat] }}
+              />
+              <span className="who">
+                P{entry.seat}
+                {entry.seat === human_seat && " (you)"}
+              </span>
+              {isRoll ? (
+                <span className={`dice-chip${entry.dice === 7 ? " seven" : ""}`}>
+                  🎲 {entry.dice}
+                </span>
+              ) : (
+                <span>{entry.action.label}</span>
+              )}
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
@@ -317,18 +435,14 @@ export default function App() {
                   🎲 {view.state.last_dice_roll}
                 </span>
               )}
-              <PhaseLabel view={view} />
-              {view.is_human_turn ? (
+              {!view.finished && <PhaseLabel view={view} />}
+              {view.finished ? null : view.is_human_turn ? (
                 <span className="your-turn">— your turn</span>
               ) : (
                 <span>— bot thinking…</span>
               )}
-              {view.finished && (
-                <span className="finished">
-                  · game over — winner: P{view.winner}
-                </span>
-              )}
             </div>
+            {view.finished && <WinnerBanner view={view} />}
             <Board
               state={view.state}
               legalActions={view.legal_actions}
@@ -344,7 +458,7 @@ export default function App() {
             {view.is_human_turn && (
               <LegalActionsPanel view={view} onPick={act} />
             )}
-            <AiActionLog view={view} />
+            <ActionHistory view={view} />
           </aside>
         </div>
       )}

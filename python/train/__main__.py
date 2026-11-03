@@ -6,7 +6,9 @@ from pathlib import Path
 
 from tqdm import tqdm
 
+from train.network_graph import NUM_LAYERS
 from train.ppo import (
+    ACTOR_PASSES,
     ADVANTAGES,
     DEFAULT_ADVANTAGE,
     DEFAULT_NETWORK,
@@ -52,6 +54,12 @@ def parse_args() -> argparse.Namespace:
         "resumed run's)",
     )
     parser.add_argument(
+        "--actor-layers",
+        type=int,
+        help="attention layers in the graph actor; the critic keeps "
+        f"{NUM_LAYERS} (default: {NUM_LAYERS}, or the resumed run's)",
+    )
+    parser.add_argument(
         "--resume",
         metavar="RUN",
         help="continue a run: a run name under checkpoints/ or a run "
@@ -92,15 +100,21 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if not 0 <= args.gae_lambda <= 1:
         parser.error("--gae-lambda must be between 0 and 1")
+    if args.actor_layers is not None and args.actor_layers < 1:
+        parser.error("--actor-layers must be at least 1")
     return args
 
 
 def log_suffix(args: argparse.Namespace) -> str:
-    """Run settings for log file names, e.g. "graph-gae0.95" or "ff-mc"."""
+    """Run settings for log file names, e.g. "graph-gae0.95", "ff-mc", or
+    "graph-a6-gae0.95" for a 6-layer actor."""
     advantage = (
         f"gae{args.gae_lambda:g}" if args.advantage == "gae" else args.advantage
     )
-    return f"{args.network}-{advantage}"
+    network = args.network
+    if args.actor_layers != NUM_LAYERS:
+        network += f"-a{args.actor_layers}"
+    return f"{network}-{advantage}"
 
 
 def main():
@@ -111,16 +125,27 @@ def main():
         checkpoint_dir = Path(args.resume)
         if not checkpoint_dir.is_dir():
             checkpoint_dir = CHECKPOINT_ROOT / args.resume
-        resume_path, resumed_network = find_resume_checkpoint(checkpoint_dir)
+        resume_path, resumed_network, resumed_layers = find_resume_checkpoint(
+            checkpoint_dir
+        )
         if args.network is not None and args.network != resumed_network:
             raise SystemExit(
                 f"--network {args.network} doesn't match {resume_path} "
                 f"({resumed_network})"
             )
+        if args.actor_layers is not None and args.actor_layers != resumed_layers:
+            raise SystemExit(
+                f"--actor-layers {args.actor_layers} doesn't match {resume_path} "
+                f"({resumed_layers})"
+            )
         args.network = resumed_network
+        args.actor_layers = resumed_layers
     else:
         checkpoint_dir = CHECKPOINT_ROOT / RUN_TIMESTAMP
         args.network = args.network or DEFAULT_NETWORK
+        if args.network == "ff" and args.actor_layers is not None:
+            raise SystemExit("--actor-layers only applies to --network graph")
+        args.actor_layers = args.actor_layers or NUM_LAYERS
     latest_checkpoint = checkpoint_dir / "actor_latest.pt"
     training_state = checkpoint_dir / TRAINING_STATE
 
@@ -130,6 +155,7 @@ def main():
         compile=args.compile,
         advantage=args.advantage,
         gae_lambda=args.gae_lambda,
+        actor_layers=args.actor_layers,
     )
     start_iter = 0
     if resume_path is not None:
@@ -189,9 +215,12 @@ def main():
 
     try:
         tqdm.write(
-            f"network: {args.network}, compile: {args.compile}, "
+            f"network: {args.network}"
+            + (f" (actor layers {args.actor_layers})" if args.network == "graph" else "")
+            + f", compile: {args.compile}, "
             f"advantage: {args.advantage}"
             + (f" (lambda {args.gae_lambda})" if args.advantage == "gae" else "")
+            + f", passes: actor {ACTOR_PASSES} / critic {ppo.critic_passes}"
             + f", baseline: {BASELINE_CHECKPOINT}"
         )
         completed = start_iter

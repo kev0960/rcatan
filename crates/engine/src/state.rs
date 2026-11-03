@@ -59,7 +59,17 @@ pub struct FullState {
     pub board: Board,
     pub longest_road: Option<(PlayerId, u8)>,
     pub player_cards: [[u8; 5]; 4],
+    // True VPs, including hidden VP cards (not the reward-shaping VP, which
+    // floors every player at 2).
     pub vps: [u8; 4],
+    // VPs visible to all players: buildings, longest road and largest army.
+    pub public_vps: [u8; 4],
+    pub knights_played: [u8; 4],
+    pub largest_army: Option<(PlayerId, u8)>,
+    // Each player's longest road length.
+    pub road_lengths: [u8; 4],
+    // Dev cards held per player (playable + bought this turn).
+    pub dev_card_counts: [u8; 4],
     pub last_dice_roll: Option<u8>,
     pub phase: Phase,
     pub winner: Option<PlayerId>,

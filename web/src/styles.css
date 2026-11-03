@@ -188,14 +188,40 @@ header h1 { margin: 0; font-size: 22px; }
   margin-top: 4px;
 }
 
-.ai-log ul { list-style: none; padding: 0; margin: 0; }
+.ai-log ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 360px;
+  overflow-y: auto;
+}
 .ai-log li {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 3px 0;
+  padding: 3px 4px;
   font-size: 12px;
+  border-radius: 3px;
 }
+.ai-log li.new { background: #f3f7fd; }
+.ai-log li.mine .who { font-weight: 600; }
+.ai-log li.roll { border-top: 1px solid #eceef2; margin-top: 2px; padding-top: 4px; }
+.ai-log .seq {
+  width: 28px;
+  text-align: right;
+  font-family: monospace;
+  font-size: 11px;
+  color: #9aa1ac;
+}
+.ai-log .who { color: #4a5568; min-width: 26px; }
+.dice-chip {
+  font-weight: 600;
+  border: 1px solid #cfd6e0;
+  border-radius: 4px;
+  padding: 0 6px;
+  background: #fff;
+}
+.dice-chip.seven { background: #fde9e9; border-color: #d4a3a3; color: #b03030; }
 .ai-log .dot {
   width: 10px;
   height: 10px;
@@ -326,3 +352,40 @@ header h1 { margin: 0; font-size: 22px; }
   .run-list { position: static; max-height: 40vh; }
   .chart-grid { grid-template-columns: 1fr; }
 }
+
+/* ---------- awards / winner ---------- */
+.player.winner { background: #fff4d1; border-color: #e0b84a; }
+.badge.winner-badge { background: #fde9a9; border-color: #d4ad3a; color: #6a4f00; font-weight: 600; }
+.vp-hidden { font-weight: 400; color: #8a6d00; font-size: 11px; }
+.awards { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+.award {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #eef4ff;
+  border: 1px solid #b9cfee;
+  color: #24456e;
+}
+.player-stats {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #6a7280;
+}
+.winner-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  background: #fff;
+  border: 1px solid #e0b84a;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+}
+.winner-banner.you { background: #eaf7ee; border-color: #8cc9a0; }
+.winner-banner .trophy { font-size: 28px; }
+.winner-title { font-size: 18px; font-weight: 700; color: #222; }
+.winner-sub { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #4a5568; }
+.winner-sub .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }

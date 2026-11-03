@@ -62,7 +62,7 @@ class GraphEncoder(nn.Module):
     fixed (54, 3) table and the batch stays a plain (B, 54, H) tensor.
     """
 
-    def __init__(self, road_endpoints: torch.Tensor):
+    def __init__(self, road_endpoints: torch.Tensor, num_layers: int = NUM_LAYERS):
         super().__init__()
 
         endpoints = torch.as_tensor(road_endpoints, dtype=torch.long)
@@ -81,10 +81,10 @@ class GraphEncoder(nn.Module):
                 edge_dim=ROAD_DIM,
                 road_endpoints=endpoints,
             )
-            for _ in range(NUM_LAYERS)
+            for _ in range(num_layers)
         )
         self.norms = nn.ModuleList(
-            nn.LayerNorm(HIDDEN_SIZE) for _ in range(NUM_LAYERS)
+            nn.LayerNorm(HIDDEN_SIZE) for _ in range(num_layers)
         )
         self.out_norm = nn.LayerNorm(HIDDEN_SIZE)
 
@@ -119,9 +119,9 @@ class GraphActor(nn.Module):
     board it acts on: a road by its two end nodes, a settlement or city by its
     node, and everything else by a pooled summary of the whole board."""
 
-    def __init__(self, road_endpoints: torch.Tensor):
+    def __init__(self, road_endpoints: torch.Tensor, num_layers: int = NUM_LAYERS):
         super().__init__()
-        self.encoder = GraphEncoder(road_endpoints)
+        self.encoder = GraphEncoder(road_endpoints, num_layers)
 
         # Symmetric in the two end nodes, so a road scores the same from either
         # end: [h_u + h_v, h_u * h_v, road features].

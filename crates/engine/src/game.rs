@@ -237,21 +237,24 @@ impl Game {
     }
 
     pub fn full_state(&self) -> FullState {
-        let mut player_cards = [[0u8; 5]; 4];
-        let mut vps = [0u8; 4];
-        for (i, p) in self.players.iter().enumerate() {
-            for j in 0..5 {
-                player_cards[i][j] = p.cards[j];
-            }
-            vps[i] = self.game_detail.vp.get_vp(p.id);
+        let s = self.state();
+        let mut dev_card_counts = [0u8; 4];
+        for i in 0..4 {
+            dev_card_counts[i] = s.dev_cards[i].iter().sum::<u8>()
+                + s.dev_cards_bought[i].iter().sum::<u8>();
         }
 
         FullState {
-            current_player: self.current_player_id(),
-            board: self.board.clone(),
-            longest_road: self.game_detail.get_longest_road(),
-            player_cards,
-            vps,
+            current_player: s.current_player,
+            board: s.board,
+            longest_road: s.longest_road,
+            player_cards: s.player_cards,
+            vps: s.vps,
+            public_vps: s.public_vps,
+            knights_played: s.knights_played,
+            largest_army: s.largest_army,
+            road_lengths: s.road_lengths,
+            dev_card_counts,
             last_dice_roll: self.last_dice_roll,
             phase: self.phase(),
             winner: self.is_game_ended(),

@@ -483,10 +483,12 @@ impl PyEngine {
     ///     "last_dice_roll": int | None,
     ///     "winner": int | None,
     ///     "longest_road": {"player": int, "length": int} | None,
+    ///     "largest_army": {"player": int, "knights": int} | None,
     ///     "tiles": list of {tile_id, resource, dice, has_robber},
     ///     "roads": list of {road_id, player},
     ///     "structures": list of {node_id, building, player},
-    ///     "players": list of {id, vp, cards: {brick, lumber, ore, grain, wool}},
+    ///     "players": list of {id, vp, public_vp, knights_played, road_length,
+    ///                         dev_cards, cards: {brick, lumber, ore, grain, wool}},
     ///   }
     fn full_state<'py>(
         &self,
@@ -494,6 +496,20 @@ impl PyEngine {
         idx: usize,
     ) -> PyResult<Bound<'py, PyDict>> {
         full_state_to_dict(py, &self.inner.full_state(idx))
+    }
+
+    /// Final `full_state` of the last game that ended in slot `idx`, or None.
+    /// Games auto-reset when they end, so this is the only way to see the
+    /// finished board and winner.
+    fn final_state<'py>(
+        &self,
+        py: Python<'py>,
+        idx: usize,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        self.inner
+            .final_state(idx)
+            .map(|fs| full_state_to_dict(py, fs))
+            .transpose()
     }
 }
 
@@ -561,6 +577,17 @@ fn full_state_to_dict<'py>(
     };
     d.set_item("longest_road", longest_road)?;
 
+    let largest_army = match fs.largest_army {
+        Some((p, count)) => {
+            let la = PyDict::new(py);
+            la.set_item("player", u8::from(p))?;
+            la.set_item("knights", count)?;
+            Some(la)
+        }
+        None => None,
+    };
+    d.set_item("largest_army", largest_army)?;
+
     // Tiles: walk dice_to_tiles (dice 2..=12) and emit each tile with its
     // canonical tile_id. Desert tiles live at the dice==7 slot.
     let mut tiles: Vec<Bound<'py, PyDict>> = Vec::with_capacity(19);
@@ -617,6 +644,10 @@ fn full_state_to_dict<'py>(
         let p = PyDict::new(py);
         p.set_item("id", i as u8)?;
         p.set_item("vp", fs.vps[i])?;
+        p.set_item("public_vp", fs.public_vps[i])?;
+        p.set_item("knights_played", fs.knights_played[i])?;
+        p.set_item("road_length", fs.road_lengths[i])?;
+        p.set_item("dev_cards", fs.dev_card_counts[i])?;
         let cards = PyDict::new(py);
         for r in Resource::ALL {
             cards.set_item(resource_name(r), fs.player_cards[i][r as usize])?;

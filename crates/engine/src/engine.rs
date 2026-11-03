@@ -7,6 +7,9 @@ use crate::state::State;
 pub struct Engine {
     games: Vec<Game>,
     next_seed: u64,
+    // Snapshot of each slot's most recently finished game, taken right before
+    // the slot is reset to a new game.
+    final_states: Vec<Option<FullState>>,
 }
 
 impl Engine {
@@ -16,6 +19,7 @@ impl Engine {
                 .map(|index| Game::new(seed + index as u64))
                 .collect(),
             next_seed: seed + batch_size as u64,
+            final_states: (0..batch_size).map(|_| None).collect(),
         }
     }
 
@@ -25,6 +29,12 @@ impl Engine {
 
     pub fn full_state(&self, idx: usize) -> FullState {
         self.games[idx].full_state()
+    }
+
+    /// Final snapshot of the last game that ended in slot `idx`, if any.
+    /// Games auto-reset on end, so `full_state` already shows the next game.
+    pub fn final_state(&self, idx: usize) -> Option<&FullState> {
+        self.final_states[idx].as_ref()
     }
 
     pub fn vps(&self) -> Vec<[u8; 4]> {
@@ -51,6 +61,7 @@ impl Engine {
         for i in 0..self.games.len() {
             if self.games[i].is_game_ended().is_some() {
                 let vps = self.games[i].vps();
+                self.final_states[i] = Some(self.games[i].full_state());
                 self.games[i] = Game::new(self.next_seed);
                 self.next_seed += 1;
                 game_ended_mask.push(Some(vps));

@@ -8,7 +8,7 @@ from torch.distributions import Categorical
 from tqdm import tqdm
 
 from train.network_ff import FeedForwardNN
-from train.network_graph import GraphActor, GraphCritic
+from train.network_graph import NUM_LAYERS, GraphActor, GraphCritic
 
 SEED = 42
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -32,10 +32,17 @@ ACTOR_OUTPUT_SIZE = 300
 NETWORKS = ("graph", "ff")
 DEFAULT_NETWORK = "graph"
 
+# Passes over each collected buffer per `train` call. The critic does fewer on
+# the graph network: more passes let it memorize the buffer's games instead of
+# learning values that carry over to new ones.
+ACTOR_PASSES = 4
+CRITIC_PASSES = {"graph": 2, "ff": 4}
 
-def build_actor(network: str) -> nn.Module:
+
+def build_actor(network: str, num_layers: int = NUM_LAYERS) -> nn.Module:
+    """`num_layers` is the graph actor's attention layer count; ff ignores it."""
     if network == "graph":
-        return GraphActor(torch.from_numpy(Engine.road_endpoints()))
+        return GraphActor(torch.from_numpy(Engine.road_endpoints()), num_layers)
     if network == "ff":
         return FeedForwardNN(input_size=ACTOR_INPUT_SIZE, output_size=ACTOR_OUTPUT_SIZE)
     raise ValueError(f"unknown network: {network!r} (expected 'graph' or 'ff')")
@@ -60,8 +67,9 @@ def load_actor(path: str | Path, device: str | torch.device = DEVICE) -> nn.Modu
         network = checkpoint["network"]
         state_len = checkpoint["state_len"]
         state_dict = checkpoint["state_dict"]
+        num_layers = checkpoint.get("num_layers", NUM_LAYERS)
     else:
-        network, state_dict = "ff", checkpoint
+        network, state_dict, num_layers = "ff", checkpoint, NUM_LAYERS
         state_len = state_dict["fc1.weight"].shape[1]
 
     if state_len != ACTOR_INPUT_SIZE:
@@ -70,7 +78,7 @@ def load_actor(path: str | Path, device: str | torch.device = DEVICE) -> nn.Modu
             f"now produces {ACTOR_INPUT_SIZE}; retrain it"
         )
 
-    actor = build_actor(network)
+    actor = build_actor(network, num_layers)
     actor.load_state_dict(state_dict)
     actor.to(device)
     actor.eval()
@@ -181,9 +189,9 @@ def play_matches(
     }
 
 
-def find_resume_checkpoint(run_dir: str | Path) -> tuple[Path, str]:
-    """Checkpoint to resume `run_dir` from, and the network it was trained
-    with. Prefers the full training state; runs saved before it existed fall
+def find_resume_checkpoint(run_dir: str | Path) -> tuple[Path, str, int]:
+    """Checkpoint to resume `run_dir` from, and the network and actor layer
+    count it was trained with. Prefers the full training state; runs saved before it existed fall
     back to their newest `actor_iter_N.pt` (actor only)."""
     run_dir = Path(run_dir)
     path = run_dir / TRAINING_STATE
@@ -198,7 +206,7 @@ def find_resume_checkpoint(run_dir: str | Path) -> tuple[Path, str]:
         path = actors[-1]
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     network = checkpoint["network"] if "network" in checkpoint else "ff"
-    return path, network
+    return path, network, checkpoint.get("num_layers", NUM_LAYERS)
 
 
 def _checkpoint_iter(path: Path) -> int:
@@ -214,13 +222,23 @@ class PPO:
         compile: bool = False,
         advantage: str = DEFAULT_ADVANTAGE,
         gae_lambda: float = GAE_LAMBDA,
+        critic_passes: int | None = None,
+        actor_layers: int = NUM_LAYERS,
     ):
         if advantage not in ADVANTAGES:
             raise ValueError(f"unknown advantage: {advantage!r} (expected {ADVANTAGES})")
+        if critic_passes is None:
+            critic_passes = CRITIC_PASSES[network]
+        if not 1 <= critic_passes <= ACTOR_PASSES:
+            raise ValueError(
+                f"critic_passes must be between 1 and {ACTOR_PASSES}, got {critic_passes}"
+            )
+        self.critic_passes = critic_passes
         self.network = network
         self.advantage = advantage
         self.gae_lambda = gae_lambda
-        self.actor = build_actor(network).to(DEVICE)
+        self.actor_layers = actor_layers
+        self.actor = build_actor(network, actor_layers).to(DEVICE)
         self.critic = build_critic(network).to(DEVICE)
         # Compiled wrappers share parameters with the modules above; collection
         # and training run through them. Checkpoints and validation use the
@@ -248,11 +266,13 @@ class PPO:
 
     def save_actor(self, path: str | Path) -> None:
         """Persist the actor's weights to `path` (parent dirs created if needed),
-        along with its network and state size so `load_actor` can rebuild it."""
+        along with its network, layer count and state size so `load_actor`
+        can rebuild it."""
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
                 "network": self.network,
+                "num_layers": self.actor_layers,
                 "state_len": ACTOR_INPUT_SIZE,
                 "state_dict": self.actor.state_dict(),
             },
@@ -266,6 +286,7 @@ class PPO:
         torch.save(
             {
                 "network": self.network,
+                "num_layers": self.actor_layers,
                 "state_len": ACTOR_INPUT_SIZE,
                 "iteration": iteration,
                 "actor": self.actor.state_dict(),
@@ -287,6 +308,11 @@ class PPO:
             raise ValueError(
                 f"{path} is a {checkpoint.get('network', 'ff')} checkpoint, "
                 f"but this run uses {self.network}"
+            )
+        if checkpoint.get("num_layers", NUM_LAYERS) != self.actor_layers:
+            raise ValueError(
+                f"{path} has a {checkpoint.get('num_layers', NUM_LAYERS)}-layer "
+                f"actor, but this run uses {self.actor_layers}"
             )
         if checkpoint.get("state_len", ACTOR_INPUT_SIZE) != ACTOR_INPUT_SIZE:
             raise ValueError(
@@ -375,8 +401,11 @@ class PPO:
         sum_approx_kl = 0.0
         sum_clip_frac = 0.0
         n_updates = 0
+        n_critic_updates = 0
 
-        for _ in tqdm(range(4), desc="train", leave=False):
+        for pass_ in tqdm(range(ACTOR_PASSES), desc="train", leave=False):
+            # The critic only trains on the first `critic_passes` passes.
+            train_critic = pass_ < self.critic_passes
             perm = torch.randperm(N)
             for start in range(0, N, mini_batch_size):
                 idx = perm[start : start + mini_batch_size]
@@ -402,24 +431,27 @@ class PPO:
                 # Minimize the PPO-Clip objective.
                 actor_loss = -torch.min(unclipped, clipped).mean()
 
-                # Value function fitting.
-                critic_loss = (
-                    (self._critic(mb_states).squeeze(-1) - mb_returns) ** 2
-                ).mean()
-
                 entropy = dist.entropy().mean()
 
-                loss = actor_loss + 0.5 * critic_loss - 0.01 * entropy
+                loss = actor_loss - 0.01 * entropy
+                if train_critic:
+                    # Value function fitting.
+                    critic_loss = (
+                        (self._critic(mb_states).squeeze(-1) - mb_returns) ** 2
+                    ).mean()
+                    loss = loss + 0.5 * critic_loss
                 self.actor_optimizer.zero_grad()
                 self.critic_optimizer.zero_grad()
 
                 loss.backward()
 
                 self.actor_optimizer.step()
-                self.critic_optimizer.step()
+                if train_critic:
+                    self.critic_optimizer.step()
+                    sum_critic_loss += critic_loss.item()
+                    n_critic_updates += 1
 
                 sum_actor_loss += actor_loss.item()
-                sum_critic_loss += critic_loss.item()
                 sum_entropy += entropy.item()
                 sum_loss += loss.item()
 
@@ -446,7 +478,7 @@ class PPO:
         return {
             "loss": sum_loss / n_updates,
             "actor_loss": sum_actor_loss / n_updates,
-            "critic_loss": sum_critic_loss / n_updates,
+            "critic_loss": sum_critic_loss / n_critic_updates,
             "entropy": sum_entropy / n_updates,
             "return_mean": flat_returns.mean().item(),
             "return_std": flat_returns.std().item(),

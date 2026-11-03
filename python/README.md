@@ -25,6 +25,15 @@ uv run python -m train --network ff
 Checkpoints record which network they were trained with, so the server and
 validation load either kind.
 
+`--actor-layers` sets how many attention layers the graph actor has
+(default 3; the critic always has 3). Each layer lets a node see one road
+further across the board. Runs with a non-default count add `-a<layers>` to
+their log names, e.g. `train-<timestamp>-graph-a6-gae0.95.csv`.
+
+```sh
+uv run python -m train --actor-layers 6
+```
+
 The actor and critic run through `torch.compile` by default, which roughly
 halves the time per iteration for the graph network. The first iteration is
 slower while it compiles. Turn it off with `--no-compile`, for example when
