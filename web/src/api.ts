@@ -53,8 +53,22 @@ export interface TrainingRunSummary {
   timestamp: string;
   tag: string | null;
   has_train: boolean;
-  has_config: boolean;
+  /** checkpoints/<run>/config.json parsed; null for runs without one. */
+  config: RunConfig | null;
   modified: number;
+}
+
+/** The fields of config.json the UI reads (see python/train/__main__.py). */
+export interface RunConfig {
+  network?: string;
+  actor_layers?: number;
+  advantage?: string;
+  gae_lambda?: number;
+  batch_size?: number;
+  actor_passes?: number;
+  critic_passes?: number;
+  lr_decay?: string;
+  [key: string]: unknown;
 }
 
 export interface MetricsTable {

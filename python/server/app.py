@@ -107,6 +107,18 @@ def read_run_config(timestamp: str) -> str | None:
         return None
 
 
+def parse_run_config(timestamp: str) -> dict[str, Any] | None:
+    """The run's config.json parsed, or None if missing or unreadable."""
+    text = read_run_config(timestamp)
+    if text is None:
+        return None
+    try:
+        config = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return config if isinstance(config, dict) else None
+
+
 def list_training_runs(root: Path | None = None) -> list[dict[str, Any]]:
     """Training runs discovered from `validation-<run>.csv` files, newest first."""
     root = root if root is not None else LOG_ROOT
@@ -124,9 +136,8 @@ def list_training_runs(root: Path | None = None) -> list[dict[str, Any]]:
                 "timestamp": m.group(1),
                 "tag": m.group(2),
                 "has_train": (root / f"train-{name}.csv").is_file(),
-                "has_config": (
-                    CHECKPOINT_ROOT / m.group(1) / RUN_CONFIG_FILENAME
-                ).is_file(),
+                # Parsed, so the run list can show the settings as badges.
+                "config": parse_run_config(m.group(1)),
                 "modified": p.stat().st_mtime,
             }
         )
@@ -314,6 +325,7 @@ def create_app() -> Starlette:
         name = request.path_params["name"]
         # Only serve runs from the discovered listing (also blocks path traversal).
         runs = {r["name"]: r for r in list_training_runs()}
+        # Verbatim text for display; the listing above has it parsed.
         if name not in runs:
             return _err(404, f"unknown training run: {name}")
         return JSONResponse(

@@ -36,8 +36,12 @@ DEFAULT_NETWORK = "graph"
 # the graph network: more passes let it memorize the buffer's games instead of
 # learning values that carry over to new ones.
 ACTOR_PASSES = 4
-# Adam learning rate for the actor and the critic at the start of training.
+# Adam learning rate for the actor at the start of training.
 LEARNING_RATE = 1e-4
+# The critic's learning rate is this multiple of the actor's, so it follows the
+# same schedule. Its regression loss tolerates larger steps than the policy,
+# which PPO keeps close to the one that collected the data.
+CRITIC_LR_SCALE = 10.0
 CRITIC_PASSES = {"graph": 2, "ff": 4}
 
 
@@ -227,6 +231,7 @@ class PPO:
         critic_passes: int | None = None,
         actor_passes: int = ACTOR_PASSES,
         actor_layers: int = NUM_LAYERS,
+        critic_lr_scale: float = CRITIC_LR_SCALE,
     ):
         if advantage not in ADVANTAGES:
             raise ValueError(f"unknown advantage: {advantage!r} (expected {ADVANTAGES})")
@@ -263,8 +268,9 @@ class PPO:
         self.actor_optimizer = torch.optim.Adam(
             self.actor.parameters(), lr=LEARNING_RATE
         )
+        self.critic_lr_scale = critic_lr_scale
         self.critic_optimizer = torch.optim.Adam(
-            self.critic.parameters(), lr=LEARNING_RATE
+            self.critic.parameters(), lr=LEARNING_RATE * critic_lr_scale
         )
 
         # The run's config, saved into every checkpoint (see `train.__main__`).
@@ -296,14 +302,21 @@ class PPO:
         )
 
     @property
-    def lr(self) -> float:
-        """Current learning rate (the actor's and the critic's are kept equal)."""
+    def actor_lr(self) -> float:
+        """The actor's current learning rate."""
         return self.actor_optimizer.param_groups[0]["lr"]
 
-    def set_lr(self, lr: float) -> None:
-        for optimizer in (self.actor_optimizer, self.critic_optimizer):
-            for group in optimizer.param_groups:
-                group["lr"] = lr
+    @property
+    def critic_lr(self) -> float:
+        return self.critic_optimizer.param_groups[0]["lr"]
+
+    def set_actor_lr(self, lr: float) -> None:
+        """Set the actor's learning rate to `lr` and the critic's to
+        `lr * critic_lr_scale`."""
+        for group in self.actor_optimizer.param_groups:
+            group["lr"] = lr
+        for group in self.critic_optimizer.param_groups:
+            group["lr"] = lr * self.critic_lr_scale
 
     def save_training_state(self, path: str | Path, iteration: int) -> None:
         """Persist everything needed to resume training after `iteration`
@@ -357,6 +370,8 @@ class PPO:
         self.actor.load_state_dict(checkpoint.get("state_dict", checkpoint))
         return _checkpoint_iter(path), False
 
+    # Collection never backpropagates, so skip building autograd graphs.
+    @torch.no_grad()
     def observe(self, steps: int):
         for step in tqdm(range(steps), desc="observe", leave=False):
             (
@@ -373,8 +388,8 @@ class PPO:
             self.buf_states.append(states)
             self.buf_players.append(players)
             self.buf_actions.append(actions)
-            self.buf_log_probs.append(log_probs.detach())
-            self.buf_values.append(value.detach())
+            self.buf_log_probs.append(log_probs)
+            self.buf_values.append(value)
             self.buf_rewards.append(rewards)
             self.buf_game_ended_mask.append(game_ended_mask)
             self.buf_masks.append(masks)
@@ -421,19 +436,24 @@ class PPO:
 
         N = flat_states.shape[0]
 
-        sum_actor_loss = 0.0
-        sum_critic_loss = 0.0
-        sum_entropy = 0.0
-        sum_loss = 0.0
-        sum_approx_kl = 0.0
-        sum_clip_frac = 0.0
+        # Summed on the GPU and read once at the end: calling .item() per
+        # minibatch makes the CPU wait for the GPU before it can queue the
+        # next one.
+        zero = torch.zeros((), device=DEVICE)
+        sum_actor_loss = zero.clone()
+        sum_critic_loss = zero.clone()
+        sum_entropy = zero.clone()
+        sum_loss = zero.clone()
+        sum_approx_kl = zero.clone()
+        sum_clip_frac = zero.clone()
         n_updates = 0
         n_critic_updates = 0
 
         for pass_ in tqdm(range(self.actor_passes), desc="train", leave=False):
             # The critic only trains on the first `critic_passes` passes.
             train_critic = pass_ < self.critic_passes
-            perm = torch.randperm(N)
+            # On the GPU, so indexing doesn't copy the indices over each time.
+            perm = torch.randperm(N, device=DEVICE)
             for start in range(0, N, mini_batch_size):
                 idx = perm[start : start + mini_batch_size]
                 mb_states = flat_states[idx]
@@ -444,9 +464,11 @@ class PPO:
                 mb_advantages = flat_advantages[idx]
 
                 # Computing the pi_theta (a_t | s_t) on the updated actor
-                logits = self._actor(mb_states)
-                logits[~mb_mask] = -float("inf")
-                dist = Categorical(logits=logits)
+                # masked_fill, unlike boolean-index assignment, doesn't wait on
+                # the GPU to count the masked entries. Argument validation
+                # would too (it checks values on the CPU); collection keeps it.
+                logits = self._actor(mb_states).masked_fill(~mb_mask, -float("inf"))
+                dist = Categorical(logits=logits, validate_args=False)
                 logp_new = dist.log_prob(mb_actions)
 
                 # Compute pi_theta (a_t | s_t) / pi_theta_old (a_t | s_t)
@@ -475,22 +497,20 @@ class PPO:
                 self.actor_optimizer.step()
                 if train_critic:
                     self.critic_optimizer.step()
-                    sum_critic_loss += critic_loss.item()
+                    sum_critic_loss += critic_loss.detach()
                     n_critic_updates += 1
 
-                sum_actor_loss += actor_loss.item()
-                sum_entropy += entropy.item()
-                sum_loss += loss.item()
+                sum_actor_loss += actor_loss.detach()
+                sum_entropy += entropy.detach()
+                sum_loss += loss.detach()
 
                 # How far this update moved the policy: KL(old || new)
                 # estimated as E[(r - 1) - log r], and the share of samples
                 # where the ratio left the clip range.
                 with torch.no_grad():
                     log_ratio = logp_new - mb_log_probs_old
-                    sum_approx_kl += ((ratio - 1) - log_ratio).mean().item()
-                    sum_clip_frac += (
-                        ((ratio - 1).abs() > EPSILON).float().mean().item()
-                    )
+                    sum_approx_kl += ((ratio - 1) - log_ratio).mean()
+                    sum_clip_frac += ((ratio - 1).abs() > EPSILON).float().mean()
                 n_updates += 1
 
         self.buf_states.clear()
@@ -503,18 +523,18 @@ class PPO:
         self.buf_masks.clear()
 
         return {
-            "loss": sum_loss / n_updates,
-            "actor_loss": sum_actor_loss / n_updates,
-            "critic_loss": sum_critic_loss / n_critic_updates,
-            "entropy": sum_entropy / n_updates,
+            "loss": sum_loss.item() / n_updates,
+            "actor_loss": sum_actor_loss.item() / n_updates,
+            "critic_loss": sum_critic_loss.item() / n_critic_updates,
+            "entropy": sum_entropy.item() / n_updates,
             "return_mean": flat_returns.mean().item(),
             "return_std": flat_returns.std().item(),
             "value_mean": values.mean().item(),
             "value_std": values.std().item(),
             "explained_var": explained_var.item(),
             "explained_var_mc": explained_var_mc.item(),
-            "approx_kl": sum_approx_kl / n_updates,
-            "clip_frac": sum_clip_frac / n_updates,
+            "approx_kl": sum_approx_kl.item() / n_updates,
+            "clip_frac": sum_clip_frac.item() / n_updates,
         }
 
     # Denote the state as s_(player)_(turn) where player is 0-3.

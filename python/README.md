@@ -66,8 +66,9 @@ perfectly, 0 = no better than always predicting the average, below 0 = worse):
   influence. Use this one to compare runs. In `mc` mode the two are equal.
 
 Continue an earlier run with `--resume`, giving a run name under
-`checkpoints/` or a run directory. `--iterations` (default 300) sets how many
-more iterations to train:
+`checkpoints/` or a run directory. `--iterations` sets how many more
+iterations to train. Without it, a resume finishes what the run had planned
+(for example, the last 50 of a 300-iteration run that stopped at 250):
 
 ```sh
 uv run python -m train --resume 20261101-125508 --iterations 100
@@ -84,19 +85,34 @@ learn from noisy advantages. The network comes from the checkpoint, and
 `--network` must match it if given. `--advantage` and `--gae-lambda` can
 change between invocations.
 
-The learning rate (actor and critic) is 1e-4 by default and stays there.
-With `--lr-decay linear` it falls linearly over the invocation's
-`--iterations` to 1e-5 (10% of the start), so late updates make smaller,
-less noisy changes to a nearly trained policy:
+The actor's learning rate is 1e-4 by default and stays there. The critic's
+is always `--critic-lr-scale` times the actor's (default 10, so 1e-3), and
+follows the same schedule. With `--lr-decay linear` it falls linearly over
+`--iterations` to `--actor-lr-min` (default 3e-5), so late updates make
+smaller, less noisy changes to a nearly trained policy:
 
 ```sh
 uv run python -m train --lr-decay linear --iterations 300
 ```
 
-The training log's `lr` column shows the rate used each iteration. Resuming
-restores the rate where it stopped. With `--lr-decay linear`, a resumed run
-decays from that rate to 1e-5 over its new `--iterations`; without it, it
-stays at the restored rate.
+The training log's `actor_lr` and `critic_lr` columns show the rates used each
+iteration. `config.json` records the schedule: `actor_lr_start`, and for a
+linear decay `actor_lr_end` and the iterations it spans (`lr_decay_from` to
+`lr_decay_to`).
+
+A resume reads the run's `config.json` and keeps its `--lr-decay`,
+`--actor-lr-min` and `--critic-lr-scale` unless you pass them (runs from
+before `--critic-lr-scale` used 1). The rate is computed from the schedule
+for the iteration it resumes at, so an interrupted run continues exactly as
+planned. Iterations past the schedule's end stay at `--actor-lr-min`, and a
+new `--actor-lr-min` moves the end of the decay. Switching to linear on a
+resume starts a new decay from where the run stopped. To continue a finished
+run at a fixed 3e-5 with a critic at 10x:
+
+```sh
+uv run python -m train --resume 20261102-230211 --iterations 200 \
+  --actor-lr-min 3e-5 --critic-lr-scale 10
+```
 
 Each iteration collects `--batch-size` games in parallel (default 64) for
 3000 steps, then trains the actor for `--actor-passes` passes over that data

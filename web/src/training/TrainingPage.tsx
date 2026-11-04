@@ -13,6 +13,7 @@ import {
   getTrainingRun,
   listTrainingRuns,
   type MetricsTable,
+  type RunConfig,
   type TrainingRun,
   type TrainingRunSummary,
 } from "../api";
@@ -62,6 +63,31 @@ function formatValue(v: number, percent?: boolean): string {
   if (a >= 1) return v.toFixed(2);
   if (a >= 0.01) return v.toFixed(3);
   return v.toExponential(2);
+}
+
+/**
+ * Settings tag from a run's config.json, in the style of the old log-name
+ * tags: always network and advantage, other settings only when they differ
+ * from the training defaults, e.g. "graph-gae0.95-b128-p2c1-lrlinear".
+ */
+function configTag(c: RunConfig): string {
+  const parts: string[] = [];
+  if (c.network) parts.push(c.network);
+  if (c.network === "graph" && c.actor_layers !== undefined && c.actor_layers !== 3) {
+    parts.push(`a${c.actor_layers}`);
+  }
+  if (c.advantage === "gae") parts.push(`gae${c.gae_lambda ?? ""}`);
+  else if (c.advantage) parts.push(c.advantage);
+  if (c.batch_size !== undefined && c.batch_size !== 64) parts.push(`b${c.batch_size}`);
+  const defaultCritic = c.network === "ff" ? 4 : 2;
+  if (
+    (c.actor_passes !== undefined && c.actor_passes !== 4) ||
+    (c.critic_passes !== undefined && c.critic_passes !== defaultCritic)
+  ) {
+    parts.push(`p${c.actor_passes ?? 4}c${c.critic_passes ?? defaultCritic}`);
+  }
+  if (c.lr_decay && c.lr_decay !== "constant") parts.push(`lr${c.lr_decay}`);
+  return parts.join("-");
 }
 
 // ---------- chart specs ----------
@@ -416,6 +442,7 @@ export default function TrainingPage() {
               >
                 <span className="run-time">{formatTimestamp(r.timestamp)}</span>
                 <span className="run-meta">
+                  {r.config && <span className="badge">{configTag(r.config)}</span>}
                   {r.tag && <span className="badge">{r.tag}</span>}
                   {!r.has_train && <span className="badge muted">no train log</span>}
                 </span>
