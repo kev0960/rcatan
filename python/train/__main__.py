@@ -6,19 +6,23 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+import torch
 from tqdm import tqdm
 
 from train.network_graph import NUM_LAYERS
 from train.ppo import (
+    ACTOR_HEADS,
     ACTOR_PASSES,
-    CRITIC_PASSES,
-    DISCOUNT_FACTOR,
     ADVANTAGES,
+    CRITIC_LR_SCALE,
+    CRITIC_PASSES,
+    DEFAULT_ACTOR_HEAD,
     DEFAULT_ADVANTAGE,
     DEFAULT_NETWORK,
+    DISCOUNT_FACTOR,
     GAE_LAMBDA,
     LEARNING_RATE,
-    CRITIC_LR_SCALE,
+    MAX_GRAD_NORM,
     NETWORKS,
     PPO,
     TRAINING_STATE,
@@ -75,6 +79,16 @@ def parse_args() -> argparse.Namespace:
         f"{NUM_LAYERS} (default: {NUM_LAYERS}, or the resumed run's)",
     )
     parser.add_argument(
+        "--actor-head",
+        choices=ACTOR_HEADS,
+        help="how the graph actor scores actions. entity: a road from its two "
+        "end nodes, a settlement or city from its node, everything else from a "
+        "pooled board summary. transformer: a board transformer over the node, "
+        "road and global tokens, then learned action tokens that read the board "
+        "through cross-attention; each logit is read from its action token. "
+        f"Slower; runs its transformers in bfloat16 on the GPU (default: {DEFAULT_ACTOR_HEAD}, or the resumed run's)",
+    )
+    parser.add_argument(
         "--resume",
         metavar="RUN",
         help="continue a run: a run name under checkpoints/ or a run "
@@ -88,6 +102,33 @@ def parse_args() -> argparse.Namespace:
         default=BATCH_SIZE,
         help="games played in parallel while collecting; each iteration "
         f"collects --batch-size x {NUM_STEPS} decisions (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--mini-batch-size",
+        type=int,
+        help="samples per optimizer step. Bigger means fewer, less noisy "
+        "updates per iteration, so the policy drifts less from the one that "
+        "collected the data. Doesn't need to fit in GPU memory: see "
+        f"--micro-batch-size (default: {MINI_BATCH_SIZE})",
+    )
+    parser.add_argument(
+        "--micro-batch-size",
+        type=int,
+        help="samples per forward/backward pass, at most --mini-batch-size. "
+        "A smaller value splits each minibatch into micro-batches and adds up "
+        "their gradients before one optimizer step (gradient accumulation): "
+        "the same update with less GPU memory. E.g. --mini-batch-size 4096 "
+        "--micro-batch-size 1024 updates on 4096 samples with the memory of "
+        "1024 (default: --mini-batch-size, i.e. no accumulation)",
+    )
+    parser.add_argument(
+        "--max-grad-norm",
+        type=float,
+        default=MAX_GRAD_NORM,
+        help="before each optimizer step, scale the actor's and the critic's "
+        "gradients (separately) down to this total norm if they are above it; "
+        "caps the size of any single update. 0 turns it off. Runs from before "
+        "2026-11-05 had none (default: %(default)s)",
     )
     parser.add_argument(
         "--actor-passes",
@@ -124,7 +165,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         help="the critic's learning rate as a multiple of the actor's; it "
         f"follows the same decay (default: {CRITIC_LR_SCALE:g}, or the resumed "
-        f"run's; {LEGACY_CRITIC_LR_SCALE:g} for runs from before this flag)",
+        "run's)",
     )
     parser.add_argument(
         "--iterations",
@@ -169,6 +210,18 @@ def parse_args() -> argparse.Namespace:
         parser.error("--iterations must be at least 1")
     if args.batch_size < 1:
         parser.error("--batch-size must be at least 1")
+    # Resolved here, not as argparse defaults, so tests can patch
+    # MINI_BATCH_SIZE.
+    if args.mini_batch_size is None:
+        args.mini_batch_size = MINI_BATCH_SIZE
+    if args.micro_batch_size is None:
+        args.micro_batch_size = args.mini_batch_size
+    if args.mini_batch_size < 1:
+        parser.error("--mini-batch-size must be at least 1")
+    if not 1 <= args.micro_batch_size <= args.mini_batch_size:
+        parser.error("--micro-batch-size must be between 1 and --mini-batch-size")
+    if args.max_grad_norm < 0:
+        parser.error("--max-grad-norm must be 0 (off) or positive")
     if args.actor_passes < 1:
         parser.error("--actor-passes must be at least 1")
     if args.critic_passes is not None and not (
@@ -308,9 +361,12 @@ def main():
         checkpoint_dir = Path(args.resume)
         if not checkpoint_dir.is_dir():
             checkpoint_dir = CHECKPOINT_ROOT / args.resume
-        resume_path, resumed_network, resumed_layers = find_resume_checkpoint(
-            checkpoint_dir
-        )
+        (
+            resume_path,
+            resumed_network,
+            resumed_layers,
+            resumed_head,
+        ) = find_resume_checkpoint(checkpoint_dir)
         if args.network is not None and args.network != resumed_network:
             raise SystemExit(
                 f"--network {args.network} doesn't match {resume_path} "
@@ -321,14 +377,23 @@ def main():
                 f"--actor-layers {args.actor_layers} doesn't match {resume_path} "
                 f"({resumed_layers})"
             )
+        if args.actor_head is not None and args.actor_head != resumed_head:
+            raise SystemExit(
+                f"--actor-head {args.actor_head} doesn't match {resume_path} "
+                f"({resumed_head}); start a new run to change it"
+            )
         args.network = resumed_network
         args.actor_layers = resumed_layers
+        args.actor_head = resumed_head
         previous_config = read_config(checkpoint_dir)
     else:
         checkpoint_dir = CHECKPOINT_ROOT / RUN_TIMESTAMP
         args.network = args.network or DEFAULT_NETWORK
         if args.network == "ff" and args.actor_layers is not None:
             raise SystemExit("--actor-layers only applies to --network graph")
+        if args.network == "ff" and args.actor_head is not None:
+            raise SystemExit("--actor-head only applies to --network graph")
+        args.actor_head = args.actor_head or DEFAULT_ACTOR_HEAD
         args.actor_layers = args.actor_layers or NUM_LAYERS
     latest_checkpoint = checkpoint_dir / "actor_latest.pt"
     training_state = checkpoint_dir / TRAINING_STATE
@@ -342,6 +407,8 @@ def main():
         actor_layers=args.actor_layers,
         actor_passes=args.actor_passes,
         critic_passes=args.critic_passes,
+        actor_head=args.actor_head,
+        max_grad_norm=args.max_grad_norm or None,
     )
     start_iter = 0
     if resume_path is not None:
@@ -370,14 +437,21 @@ def main():
         "iterations": start_iter + args.iterations,
         "network": args.network,
         "actor_layers": args.actor_layers,
+        "actor_head": ppo.actor_head,
+        "float32_matmul_precision": torch.get_float32_matmul_precision(),
         "advantage": args.advantage,
         "gae_lambda": args.gae_lambda,
         "discount_factor": DISCOUNT_FACTOR,
         "batch_size": args.batch_size,
         "num_steps": NUM_STEPS,
-        "mini_batch_size": MINI_BATCH_SIZE,
+        "mini_batch_size": args.mini_batch_size,
+        # Samples per forward/backward; below mini_batch_size means gradient
+        # accumulation. Runs from before 2026-11-05 had no accumulation.
+        "micro_batch_size": args.micro_batch_size,
         "actor_passes": ppo.actor_passes,
         "critic_passes": ppo.critic_passes,
+        # null: no gradient clipping, as in runs from before 2026-11-05.
+        "max_grad_norm": ppo.max_grad_norm,
         "lr_decay": args.lr_decay,
         "actor_lr_min": args.actor_lr_min,
         # actor_lr_start, and for linear actor_lr_end and the 0-based
@@ -408,6 +482,13 @@ def main():
             "explained_var_mc",
             "actor_lr",
             "critic_lr",
+            # Gradient norms before clipping: mean and max over the
+            # iteration's steps, and the share of actor steps clipped.
+            "actor_grad_norm",
+            "actor_grad_norm_max",
+            "actor_grad_clipped",
+            "critic_grad_norm",
+            "critic_grad_norm_max",
         ],
     )
     val_file, val_writer = _open_csv(
@@ -436,7 +517,11 @@ def main():
     try:
         tqdm.write(
             f"network: {args.network}"
-            + (f" (actor layers {args.actor_layers})" if args.network == "graph" else "")
+            + (
+                f" (actor layers {args.actor_layers}, "
+                f"actor head: {ppo.actor_head})"
+                if args.network == "graph" else ""
+            )
             + f", compile: {args.compile}, "
             f"advantage: {args.advantage}"
             + (f" (lambda {args.gae_lambda})" if args.advantage == "gae" else "")
@@ -455,7 +540,10 @@ def main():
         for i in pbar:
             ppo.set_actor_lr(scheduled_actor_lr(schedule, i, args.actor_lr_min))
             ppo.observe(NUM_STEPS)
-            metrics = ppo.train(mini_batch_size=MINI_BATCH_SIZE)
+            metrics = ppo.train(
+                mini_batch_size=args.mini_batch_size,
+                micro_batch_size=args.micro_batch_size,
+            )
             pbar.set_postfix(
                 loss=f"{metrics['loss']:.3f}",
                 actor=f"{metrics['actor_loss']:.3f}",
@@ -465,6 +553,7 @@ def main():
                 ev_mc=f"{metrics['explained_var_mc']:.2f}",
                 actor_lr=f"{ppo.actor_lr:.2g}",
                 kl=f"{metrics['approx_kl']:.4f}",
+                gnorm=f"{metrics['actor_grad_norm']:.2f}",
             )
 
             train_writer.writerow(
@@ -484,6 +573,11 @@ def main():
                     f"{metrics['explained_var_mc']:.6f}",
                     f"{ppo.actor_lr:.3g}",
                     f"{ppo.critic_lr:.3g}",
+                    f"{metrics['actor_grad_norm']:.6f}",
+                    f"{metrics['actor_grad_norm_max']:.6f}",
+                    f"{metrics['actor_grad_clipped']:.6f}",
+                    f"{metrics['critic_grad_norm']:.6f}",
+                    f"{metrics['critic_grad_norm_max']:.6f}",
                 ]
             )
             train_file.flush()

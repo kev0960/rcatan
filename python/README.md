@@ -26,12 +26,53 @@ Checkpoints record which network they were trained with, so the server and
 validation load either kind.
 
 `--actor-layers` sets how many attention layers the graph actor has
-(default 3; the critic always has 3). Each layer lets a node see one road
-further across the board.
+(default 3; the critic always has 3). Each convolution passes local messages
+one road further across the board.
 
 ```sh
 uv run python -m train --actor-layers 6
 ```
+
+Global fusion (pooling the board into every node after each convolution,
+2026-11-03) was removed on 2026-11-05: it didn't beat the plain encoder.
+Checkpoints trained with it no longer load; the others do.
+
+`--actor-head` picks how the graph actor turns the encoder's output into the
+300 action logits (default `entity`):
+
+- `entity`: a road is scored from its two end nodes, a settlement or city
+  from its node, and everything else from a pooled summary of the board
+  (`GraphActor`).
+- `transformer`: a 2-layer transformer lets the 54 node, 72 road and one
+  global token attend to each other. Then 300 learned action tokens go
+  through 2 cross-attention layers: they read the board tokens but not each
+  other. Each logit is read from its action token, so each action learns
+  where on the board to look (`train/network_transformer.py`). On the GPU
+  the transformers run in bfloat16. It's several times slower to train than
+  `entity`. Checkpoints from before 2026-11-05 (with action self-attention)
+  no longer load.
+
+```sh
+uv run python -m train --actor-head transformer \
+    --mini-batch-size 4096 --micro-batch-size 1024
+```
+
+`--mini-batch-size` is the samples per optimizer step (default 1024).
+`--micro-batch-size` splits each minibatch into smaller forward/backward
+passes whose gradients are added up before the step (gradient
+accumulation), so a big minibatch fits in GPU memory. Both are recorded in
+`config.json`.
+
+`--max-grad-norm` (default 0.5) scales the actor's and the critic's
+gradients down to that total norm before each optimizer step when they are
+above it, so no single update can be huge; 0 turns it off. Runs from before
+2026-11-05 had none. The train log records the norms before clipping
+(`actor_grad_norm`, `actor_grad_norm_max`, `critic_grad_norm`,
+`critic_grad_norm_max`) and the share of actor steps clipped
+(`actor_grad_clipped`).
+
+Checkpoints and `config.json` record `actor_head`; older checkpoints are
+`entity`. Resuming keeps the saved head. The critic is always `GraphCritic`.
 
 The actor and critic run through `torch.compile` by default, which roughly
 halves the time per iteration for the graph network. The first iteration is
@@ -86,7 +127,7 @@ learn from noisy advantages. The network comes from the checkpoint, and
 change between invocations.
 
 The actor's learning rate is 1e-4 by default and stays there. The critic's
-is always `--critic-lr-scale` times the actor's (default 10, so 1e-3), and
+is always `--critic-lr-scale` times the actor's (default 1, the same rate), and
 follows the same schedule. With `--lr-decay linear` it falls linearly over
 `--iterations` to `--actor-lr-min` (default 3e-5), so late updates make
 smaller, less noisy changes to a nearly trained policy:
@@ -107,11 +148,11 @@ for the iteration it resumes at, so an interrupted run continues exactly as
 planned. Iterations past the schedule's end stay at `--actor-lr-min`, and a
 new `--actor-lr-min` moves the end of the decay. Switching to linear on a
 resume starts a new decay from where the run stopped. To continue a finished
-run at a fixed 3e-5 with a critic at 10x:
+run at a fixed 3e-5:
 
 ```sh
 uv run python -m train --resume 20261102-230211 --iterations 200 \
-  --actor-lr-min 3e-5 --critic-lr-scale 10
+  --actor-lr-min 3e-5
 ```
 
 Each iteration collects `--batch-size` games in parallel (default 64) for

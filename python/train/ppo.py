@@ -9,11 +9,37 @@ from tqdm import tqdm
 
 from train.network_ff import FeedForwardNN
 from train.network_graph import NUM_LAYERS, GraphActor, GraphCritic
+from train.network_transformer import TransformerActor
 
 SEED = 42
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Let float32 matmuls use TF32 tensor cores: float32's range with about 10
+# mantissa bits. Several times faster on matmul-heavy networks (the transformer
+# actor), and the rounding is far below minibatch gradient noise. Runs from
+# before 2026-11-04 used full float32.
+torch.set_float32_matmul_precision("high")
 DISCOUNT_FACTOR = 0.996
 EPSILON = 0.2
+# Gradient-norm clipping, applied to the actor's and the critic's gradients
+# separately, just before each optimizer step: if the gradient's total L2 norm
+# (over all of that network's parameters) is above this, the whole gradient is
+# scaled down to this norm. Its direction is unchanged; below the threshold it
+# does nothing.
+#
+# This is not the same as PPO's ratio clip (EPSILON). The ratio clip works per
+# sample, inside the loss: once a sample's ratio has left [1 - EPSILON,
+# 1 + EPSILON] in the direction its advantage pushes, that sample's gradient
+# is 0. But it is checked against the weights before the step, and it never
+# scales down the samples still inside the range. So one minibatch with an
+# unusually large gradient (all ratios still near 1) can take one huge step,
+# and Adam can enlarge it further for weights whose recent gradients were
+# small. Norm clipping caps every single step. It is standard in PPO
+# implementations (OpenAI baselines, CleanRL, Stable-Baselines3), at 0.5.
+#
+# Added 2026-11-05 after KL spikes in the transformer runs (0.043 at iteration
+# 221 of 20261104-230947, 0.050 at iteration 46 of 20261105-210942, against a
+# usual 0.005-0.007). Earlier runs had no clipping. None disables it.
+MAX_GRAD_NORM = 0.5
 GAE_LAMBDA = 0.95
 
 # How advantages and critic targets are computed: "gae" (GAE(lambda), see
@@ -32,6 +58,12 @@ ACTOR_OUTPUT_SIZE = 300
 NETWORKS = ("graph", "ff")
 DEFAULT_NETWORK = "graph"
 
+# How the graph actor turns the encoder's output into the 300 logits:
+# "entity" (GraphActor: per-road, per-node and pooled heads) or "transformer"
+# (TransformerActor: learned action tokens attend over the board).
+ACTOR_HEADS = ("entity", "transformer")
+DEFAULT_ACTOR_HEAD = "entity"
+
 # Passes over each collected buffer per `train` call. The critic does fewer on
 # the graph network: more passes let it memorize the buffer's games instead of
 # learning values that carry over to new ones.
@@ -39,16 +71,25 @@ ACTOR_PASSES = 4
 # Adam learning rate for the actor at the start of training.
 LEARNING_RATE = 1e-4
 # The critic's learning rate is this multiple of the actor's, so it follows the
-# same schedule. Its regression loss tolerates larger steps than the policy,
-# which PPO keeps close to the one that collected the data.
-CRITIC_LR_SCALE = 10.0
+# same schedule. 10x made the critic's predictions worse (explained_var_mc
+# about 0.04 lower) and the actor a few points weaker than 1x.
+CRITIC_LR_SCALE = 1.0
 CRITIC_PASSES = {"graph": 2, "ff": 4}
 
 
-def build_actor(network: str, num_layers: int = NUM_LAYERS) -> nn.Module:
-    """`num_layers` is the graph actor's attention layer count; ff ignores it."""
+def build_actor(
+    network: str,
+    num_layers: int = NUM_LAYERS,
+    actor_head: str = DEFAULT_ACTOR_HEAD,
+) -> nn.Module:
+    """Build the actor; layer count and the actor head apply only to graph."""
     if network == "graph":
-        return GraphActor(torch.from_numpy(Engine.road_endpoints()), num_layers)
+        if actor_head not in ACTOR_HEADS:
+            raise ValueError(
+                f"unknown actor head: {actor_head!r} (expected {ACTOR_HEADS})"
+            )
+        actor_class = TransformerActor if actor_head == "transformer" else GraphActor
+        return actor_class(torch.from_numpy(Engine.road_endpoints()), num_layers)
     if network == "ff":
         return FeedForwardNN(input_size=ACTOR_INPUT_SIZE, output_size=ACTOR_OUTPUT_SIZE)
     raise ValueError(f"unknown network: {network!r} (expected 'graph' or 'ff')")
@@ -84,7 +125,10 @@ def load_actor(path: str | Path, device: str | torch.device = DEVICE) -> nn.Modu
             f"now produces {ACTOR_INPUT_SIZE}; retrain it"
         )
 
-    actor = build_actor(network, num_layers)
+    _reject_global_fusion(checkpoint, path)
+    actor = build_actor(
+        network, num_layers, checkpoint.get("actor_head", DEFAULT_ACTOR_HEAD)
+    )
     actor.load_state_dict(state_dict)
     actor.to(device)
     actor.eval()
@@ -195,10 +239,12 @@ def play_matches(
     }
 
 
-def find_resume_checkpoint(run_dir: str | Path) -> tuple[Path, str, int]:
-    """Checkpoint to resume `run_dir` from, and the network and actor layer
-    count it was trained with. Prefers the full training state; runs saved before it existed fall
-    back to their newest `actor_iter_N.pt` (actor only)."""
+def find_resume_checkpoint(
+    run_dir: str | Path,
+) -> tuple[Path, str, int, bool, str]:
+    """Checkpoint to resume `run_dir` from, and its network, actor layer
+    count, global fusion setting and actor head. Prefers the full training state; older
+    runs fall back to their newest `actor_iter_N.pt` (actor only)."""
     run_dir = Path(run_dir)
     path = run_dir / TRAINING_STATE
     if not path.is_file():
@@ -211,8 +257,27 @@ def find_resume_checkpoint(run_dir: str | Path) -> tuple[Path, str, int]:
             )
         path = actors[-1]
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    _reject_global_fusion(checkpoint, path)
     network = checkpoint["network"] if "network" in checkpoint else "ff"
-    return path, network, checkpoint.get("num_layers", NUM_LAYERS)
+    return (
+        path,
+        network,
+        checkpoint.get("num_layers", NUM_LAYERS),
+        checkpoint.get("actor_head", DEFAULT_ACTOR_HEAD),
+    )
+
+
+def _reject_global_fusion(checkpoint: dict, path: str | Path) -> None:
+    """Global fusion (pooling the board into every node after each graph
+    convolution) was removed on 2026-11-05: its only run, 20261103-185950,
+    ended at parity with the runs without it. Checkpoints from 2026-11-03 to
+    2026-11-05 record `global_fusion`; those with it off still load, and those
+    with it on can't, since their encoder has layers this code no longer has."""
+    if checkpoint.get("global_fusion", False):
+        raise ValueError(
+            f"{path} was trained with global fusion, which was removed; "
+            "it can't be loaded by this version"
+        )
 
 
 def _checkpoint_iter(path: Path) -> int:
@@ -232,6 +297,8 @@ class PPO:
         actor_passes: int = ACTOR_PASSES,
         actor_layers: int = NUM_LAYERS,
         critic_lr_scale: float = CRITIC_LR_SCALE,
+        actor_head: str = DEFAULT_ACTOR_HEAD,
+        max_grad_norm: float | None = MAX_GRAD_NORM,
     ):
         if advantage not in ADVANTAGES:
             raise ValueError(f"unknown advantage: {advantage!r} (expected {ADVANTAGES})")
@@ -245,13 +312,20 @@ class PPO:
                 f"critic_passes must be between 1 and actor_passes "
                 f"({actor_passes}), got {critic_passes}"
             )
+        if max_grad_norm is not None and max_grad_norm <= 0:
+            raise ValueError(f"max_grad_norm must be positive or None, got {max_grad_norm}")
         self.actor_passes = actor_passes
         self.critic_passes = critic_passes
+        self.max_grad_norm = max_grad_norm
         self.network = network
         self.advantage = advantage
         self.gae_lambda = gae_lambda
         self.actor_layers = actor_layers
-        self.actor = build_actor(network, actor_layers).to(DEVICE)
+        # The feed-forward actor has a single head.
+        self.actor_head = actor_head if network == "graph" else DEFAULT_ACTOR_HEAD
+        self.actor = build_actor(
+            network, actor_layers, self.actor_head
+        ).to(DEVICE)
         self.critic = build_critic(network).to(DEVICE)
         # Compiled wrappers share parameters with the modules above; collection
         # and training run through them. Checkpoints and validation use the
@@ -294,6 +368,7 @@ class PPO:
             {
                 "network": self.network,
                 "num_layers": self.actor_layers,
+                "actor_head": self.actor_head,
                 "state_len": ACTOR_INPUT_SIZE,
                 "config": self.config,
                 "state_dict": self.actor.state_dict(),
@@ -326,6 +401,7 @@ class PPO:
             {
                 "network": self.network,
                 "num_layers": self.actor_layers,
+                "actor_head": self.actor_head,
                 "state_len": ACTOR_INPUT_SIZE,
                 "iteration": iteration,
                 "config": self.config,
@@ -343,7 +419,10 @@ class PPO:
         checkpoint only restores the actor; the critic and optimizers start
         fresh and the iteration comes from its `actor_iter_N.pt` name."""
         path = Path(path)
-        checkpoint = torch.load(path, map_location=DEVICE, weights_only=True)
+        # Load onto the CPU: load_state_dict copies weights and Adam's moments
+        # to the parameters' device, but leaves Adam's step counter where it
+        # is, and Adam expects it on the CPU (on the GPU it syncs every step).
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
         if checkpoint.get("network", "ff") != self.network:
             raise ValueError(
                 f"{path} is a {checkpoint.get('network', 'ff')} checkpoint, "
@@ -353,6 +432,14 @@ class PPO:
             raise ValueError(
                 f"{path} has a {checkpoint.get('num_layers', NUM_LAYERS)}-layer "
                 f"actor, but this run uses {self.actor_layers}"
+            )
+        _reject_global_fusion(checkpoint, path)
+        saved_head = checkpoint.get("actor_head", DEFAULT_ACTOR_HEAD)
+        if saved_head != self.actor_head:
+            raise ValueError(
+                f"{path} has actor_head={saved_head}, but this run uses "
+                f"actor_head={self.actor_head}; resume with the checkpoint's "
+                "architecture or start a new run"
             )
         if checkpoint.get("state_len", ACTOR_INPUT_SIZE) != ACTOR_INPUT_SIZE:
             raise ValueError(
@@ -394,7 +481,32 @@ class PPO:
             self.buf_game_ended_mask.append(game_ended_mask)
             self.buf_masks.append(masks)
 
-    def train(self, mini_batch_size: int):
+    def train(self, mini_batch_size: int, micro_batch_size: int | None = None):
+        """One PPO update on the collected buffer.
+
+        mini_batch_size: samples per optimizer step.
+        micro_batch_size: samples per forward/backward pass, at most
+            mini_batch_size (default: the same, i.e. no accumulation). Each
+            minibatch is split into micro-batches whose gradients add up in
+            `.grad` before the single optimizer step (gradient accumulation).
+            Only one micro-batch's activations are in memory at a time, so a
+            4096 update fits in the memory of a 1024 one. The step is the same
+            as one 4096 forward/backward (up to float rounding): every loss
+            here is a per-sample mean, so each micro-batch's mean is weighted
+            by its share of the minibatch, and the advantages are normalized
+            over the whole buffer, not per minibatch.
+
+        Bigger minibatches mean fewer, less noisy steps per iteration. With a
+        fixed buffer, 4096 instead of 1024 is 4x fewer actor steps per pass,
+        each averaging 4x more samples, so the policy drifts less from the one
+        that collected the data (lower KL and clip_frac per iteration).
+        """
+        micro_batch_size = micro_batch_size or mini_batch_size
+        if not 1 <= micro_batch_size <= mini_batch_size:
+            raise ValueError(
+                f"micro_batch_size={micro_batch_size} must be between 1 and "
+                f"mini_batch_size={mini_batch_size}"
+            )
         # stack(values) is (T, B, 1)
         values = torch.stack(self.buf_values).squeeze(-1).to(DEVICE)
 
@@ -446,6 +558,16 @@ class PPO:
         sum_loss = zero.clone()
         sum_approx_kl = zero.clone()
         sum_clip_frac = zero.clone()
+        # Gradient norms before clipping (see MAX_GRAD_NORM): the mean and max
+        # over this iteration's steps, and the share of actor steps that were
+        # clipped. A KL spike from one huge step shows up as a max far above
+        # the mean. If nearly every step is clipped, the threshold is too low
+        # and is acting as a lower learning rate.
+        sum_actor_grad_norm = zero.clone()
+        max_actor_grad_norm = zero.clone()
+        sum_actor_clipped = zero.clone()
+        sum_critic_grad_norm = zero.clone()
+        max_critic_grad_norm = zero.clone()
         n_updates = 0
         n_critic_updates = 0
 
@@ -456,61 +578,103 @@ class PPO:
             perm = torch.randperm(N, device=DEVICE)
             for start in range(0, N, mini_batch_size):
                 idx = perm[start : start + mini_batch_size]
-                mb_states = flat_states[idx]
-                mb_mask = flat_mask[idx]
-                mb_actions = flat_actions[idx]
-                mb_log_probs_old = flat_log_probs_old[idx]
-                mb_returns = flat_returns[idx]
-                mb_advantages = flat_advantages[idx]
+                # A Python int (slicing is resolved on the CPU), so no GPU sync.
+                mb_len = idx.shape[0]
 
-                # Computing the pi_theta (a_t | s_t) on the updated actor
-                # masked_fill, unlike boolean-index assignment, doesn't wait on
-                # the GPU to count the masked entries. Argument validation
-                # would too (it checks values on the CPU); collection keeps it.
-                logits = self._actor(mb_states).masked_fill(~mb_mask, -float("inf"))
-                dist = Categorical(logits=logits, validate_args=False)
-                logp_new = dist.log_prob(mb_actions)
-
-                # Compute pi_theta (a_t | s_t) / pi_theta_old (a_t | s_t)
-                ratio = torch.exp(logp_new - mb_log_probs_old)
-
-                unclipped = ratio * mb_advantages
-                clipped = torch.clamp(ratio, 1 - EPSILON, 1 + EPSILON) * mb_advantages
-
-                # Minimize the PPO-Clip objective.
-                actor_loss = -torch.min(unclipped, clipped).mean()
-
-                entropy = dist.entropy().mean()
-
-                loss = actor_loss - 0.01 * entropy
-                if train_critic:
-                    # Value function fitting.
-                    critic_loss = (
-                        (self._critic(mb_states).squeeze(-1) - mb_returns) ** 2
-                    ).mean()
-                    loss = loss + 0.5 * critic_loss
                 self.actor_optimizer.zero_grad()
                 self.critic_optimizer.zero_grad()
 
-                loss.backward()
+                # Gradient accumulation: forward/backward one micro-batch at a
+                # time; .backward() adds into .grad, and the optimizers step
+                # once below. With micro_batch_size == mini_batch_size this
+                # loop runs once and is a plain minibatch update.
+                for micro_start in range(0, mb_len, micro_batch_size):
+                    micro_idx = idx[micro_start : micro_start + micro_batch_size]
+                    # This micro-batch's share of the minibatch. Its losses
+                    # are means over its own samples, so scaling each by its
+                    # share and summing gives the mean over the minibatch,
+                    # also when the last micro-batch is short.
+                    weight = micro_idx.shape[0] / mb_len
 
+                    mb_states = flat_states[micro_idx]
+                    mb_mask = flat_mask[micro_idx]
+                    mb_actions = flat_actions[micro_idx]
+                    mb_log_probs_old = flat_log_probs_old[micro_idx]
+                    mb_returns = flat_returns[micro_idx]
+                    mb_advantages = flat_advantages[micro_idx]
+
+                    # Computing the pi_theta (a_t | s_t) on the updated actor
+                    # masked_fill, unlike boolean-index assignment, doesn't
+                    # wait on the GPU to count the masked entries. Argument
+                    # validation would too (it checks values on the CPU);
+                    # collection keeps it.
+                    logits = self._actor(mb_states).masked_fill(
+                        ~mb_mask, -float("inf")
+                    )
+                    dist = Categorical(logits=logits, validate_args=False)
+                    logp_new = dist.log_prob(mb_actions)
+
+                    # Compute pi_theta (a_t | s_t) / pi_theta_old (a_t | s_t)
+                    ratio = torch.exp(logp_new - mb_log_probs_old)
+
+                    unclipped = ratio * mb_advantages
+                    clipped = (
+                        torch.clamp(ratio, 1 - EPSILON, 1 + EPSILON) * mb_advantages
+                    )
+
+                    # Minimize the PPO-Clip objective.
+                    actor_loss = -torch.min(unclipped, clipped).mean()
+
+                    entropy = dist.entropy().mean()
+
+                    loss = actor_loss - 0.01 * entropy
+                    if train_critic:
+                        # Value function fitting.
+                        critic_loss = (
+                            (self._critic(mb_states).squeeze(-1) - mb_returns) ** 2
+                        ).mean()
+                        loss = loss + 0.5 * critic_loss
+
+                    (loss * weight).backward()
+
+                    # Metrics: weighted the same way, so each update adds its
+                    # minibatch mean, and the logged value is the average over
+                    # updates as before.
+                    if train_critic:
+                        sum_critic_loss += critic_loss.detach() * weight
+                    sum_actor_loss += actor_loss.detach() * weight
+                    sum_entropy += entropy.detach() * weight
+                    sum_loss += loss.detach() * weight
+
+                    # How far this update moved the policy: KL(old || new)
+                    # estimated as E[(r - 1) - log r], and the share of
+                    # samples where the ratio left the clip range.
+                    with torch.no_grad():
+                        log_ratio = logp_new - mb_log_probs_old
+                        sum_approx_kl += ((ratio - 1) - log_ratio).mean() * weight
+                        sum_clip_frac += (
+                            ((ratio - 1).abs() > EPSILON).float().mean() * weight
+                        )
+
+                # The gradient of the whole minibatch is complete here (all
+                # micro-batches added up), so the norm is the minibatch's, the
+                # same with or without accumulation. Clipped per network: the
+                # critic's gradient is typically much larger than the actor's
+                # and would otherwise dominate a joint norm.
+                actor_grad_norm = self._clip_gradients(self.actor)
+                sum_actor_grad_norm += actor_grad_norm
+                max_actor_grad_norm = torch.maximum(max_actor_grad_norm, actor_grad_norm)
+                if self.max_grad_norm is not None:
+                    sum_actor_clipped += (actor_grad_norm > self.max_grad_norm).float()
                 self.actor_optimizer.step()
                 if train_critic:
+                    critic_grad_norm = self._clip_gradients(self.critic)
+                    sum_critic_grad_norm += critic_grad_norm
+                    max_critic_grad_norm = torch.maximum(
+                        max_critic_grad_norm, critic_grad_norm
+                    )
                     self.critic_optimizer.step()
-                    sum_critic_loss += critic_loss.detach()
                     n_critic_updates += 1
-
-                sum_actor_loss += actor_loss.detach()
-                sum_entropy += entropy.detach()
-                sum_loss += loss.detach()
-
-                # How far this update moved the policy: KL(old || new)
-                # estimated as E[(r - 1) - log r], and the share of samples
-                # where the ratio left the clip range.
-                with torch.no_grad():
-                    log_ratio = logp_new - mb_log_probs_old
-                    sum_approx_kl += ((ratio - 1) - log_ratio).mean()
-                    sum_clip_frac += ((ratio - 1).abs() > EPSILON).float().mean()
                 n_updates += 1
 
         self.buf_states.clear()
@@ -535,7 +699,21 @@ class PPO:
             "explained_var_mc": explained_var_mc.item(),
             "approx_kl": sum_approx_kl.item() / n_updates,
             "clip_frac": sum_clip_frac.item() / n_updates,
+            "actor_grad_norm": sum_actor_grad_norm.item() / n_updates,
+            "actor_grad_norm_max": max_actor_grad_norm.item(),
+            "actor_grad_clipped": sum_actor_clipped.item() / n_updates,
+            "critic_grad_norm": sum_critic_grad_norm.item() / n_critic_updates,
+            "critic_grad_norm_max": max_critic_grad_norm.item(),
         }
+
+    def _clip_gradients(self, network: nn.Module) -> torch.Tensor:
+        """Scale `network`'s gradients down to `max_grad_norm` if their total
+        norm is above it (see MAX_GRAD_NORM). Returns the norm before clipping,
+        as a GPU tensor (no sync). With clipping off, only measures it."""
+        params = [p for p in network.parameters() if p.grad is not None]
+        if self.max_grad_norm is None:
+            return torch.nn.utils.get_total_norm([p.grad for p in params])
+        return torch.nn.utils.clip_grad_norm_(params, self.max_grad_norm)
 
     # Denote the state as s_(player)_(turn) where player is 0-3.
     # Denote the action as a_(player)_(turn) where player is 0-3.

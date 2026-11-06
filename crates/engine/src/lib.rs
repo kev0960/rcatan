@@ -1,4 +1,5 @@
 mod action;
+mod bayesian_estimate;
 mod board;
 mod engine;
 mod game;
