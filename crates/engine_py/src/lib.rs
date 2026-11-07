@@ -4,7 +4,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rcatan::{
     Action, Building, DevCard, Engine, FullState, Phase, PlayerId,
-    ROAD_TO_NODES, RelativePlayerId, Resource, State, TileType, port_at_node,
+    ROAD_TO_NODES, RelativePlayerId, Resource, State, TILE_TO_NODE, TileType,
+    port_at_node,
 };
 
 // Action space layout (300 total):
@@ -356,6 +357,20 @@ impl PyEngine {
             .collect();
         Array2::from_shape_vec((72, 2), flat)
             .expect("72 roads with 2 endpoints each")
+            .into_pyarray(py)
+    }
+
+    /// The six corner node ids of each tile, as ndarray (19, 6) i64, indexed
+    /// by tile id (the same id as in MoveRobber actions). Fixed across games;
+    /// graph actors use it to score a robber move from the tile's corners.
+    #[staticmethod]
+    fn tile_nodes<'py>(py: Python<'py>) -> Bound<'py, PyArray2<i64>> {
+        let flat: Vec<i64> = TILE_TO_NODE
+            .iter()
+            .flat_map(|corners| corners.iter().map(|n| u8::from(*n) as i64))
+            .collect();
+        Array2::from_shape_vec((19, 6), flat)
+            .expect("19 tiles with 6 corners each")
             .into_pyarray(py)
     }
 

@@ -39,7 +39,16 @@ EPSILON = 0.2
 # Added 2026-11-05 after KL spikes in the transformer runs (0.043 at iteration
 # 221 of 20261104-230947, 0.050 at iteration 46 of 20261105-210942, against a
 # usual 0.005-0.007). Earlier runs had no clipping. None disables it.
-MAX_GRAD_NORM = 0.5
+#
+# Raised from 0.5 to 2.0 on 2026-11-06. In 20261105-222120 (0.5) the actor's
+# mean norm grew from 0.05 to about 0.95 as training went on, so from
+# iteration 51 every single step was clipped (scaled by about 0.5). With Adam a
+# steady scale like that changes little, but it means the clip no longer tells
+# outliers apart. Within an iteration the largest step was usually only about
+# 1.5x the mean, while the outliers were 5-35x (25.2 at iteration 41). 2.0 is
+# about 2x the typical actor norm: ordinary steps pass, outliers are still
+# capped. The critic's norm (about 0.2-0.3) is then practically never clipped.
+MAX_GRAD_NORM = 2.0
 GAE_LAMBDA = 0.95
 
 # How advantages and critic targets are computed: "gae" (GAE(lambda), see
@@ -59,10 +68,18 @@ NETWORKS = ("graph", "ff")
 DEFAULT_NETWORK = "graph"
 
 # How the graph actor turns the encoder's output into the 300 logits:
-# "entity" (GraphActor: per-road, per-node and pooled heads) or "transformer"
-# (TransformerActor: learned action tokens attend over the board).
-ACTOR_HEADS = ("entity", "transformer")
-DEFAULT_ACTOR_HEAD = "entity"
+# - "entity-robber" (GraphActor with tile_nodes): per-road, per-node and
+#   per-tile (robber) heads, plus a pooled head for the rest. Added 2026-11-06.
+# - "entity" (GraphActor): the same, but the robber moves come from the
+#   pooled head. Every graph run up to 2026-11-06 (230211, 115058, ...).
+# - "transformer" (TransformerActor: learned action tokens attend over the
+#   board).
+ACTOR_HEADS = ("entity-robber", "entity", "transformer")
+DEFAULT_ACTOR_HEAD = "entity-robber"
+# The head of a checkpoint that doesn't record one: they all predate the
+# actor_head setting, so they are "entity". Feed-forward runs record it too,
+# though their single head ignores it.
+LEGACY_ACTOR_HEAD = "entity"
 
 # Passes over each collected buffer per `train` call. The critic does fewer on
 # the graph network: more passes let it memorize the buffer's games instead of
@@ -88,8 +105,15 @@ def build_actor(
             raise ValueError(
                 f"unknown actor head: {actor_head!r} (expected {ACTOR_HEADS})"
             )
-        actor_class = TransformerActor if actor_head == "transformer" else GraphActor
-        return actor_class(torch.from_numpy(Engine.road_endpoints()), num_layers)
+        road_endpoints = torch.from_numpy(Engine.road_endpoints())
+        if actor_head == "transformer":
+            return TransformerActor(road_endpoints, num_layers)
+        tile_nodes = (
+            torch.from_numpy(Engine.tile_nodes())
+            if actor_head == "entity-robber"
+            else None
+        )
+        return GraphActor(road_endpoints, num_layers, tile_nodes)
     if network == "ff":
         return FeedForwardNN(input_size=ACTOR_INPUT_SIZE, output_size=ACTOR_OUTPUT_SIZE)
     raise ValueError(f"unknown network: {network!r} (expected 'graph' or 'ff')")
@@ -127,7 +151,7 @@ def load_actor(path: str | Path, device: str | torch.device = DEVICE) -> nn.Modu
 
     _reject_global_fusion(checkpoint, path)
     actor = build_actor(
-        network, num_layers, checkpoint.get("actor_head", DEFAULT_ACTOR_HEAD)
+        network, num_layers, checkpoint.get("actor_head", LEGACY_ACTOR_HEAD)
     )
     actor.load_state_dict(state_dict)
     actor.to(device)
@@ -263,7 +287,7 @@ def find_resume_checkpoint(
         path,
         network,
         checkpoint.get("num_layers", NUM_LAYERS),
-        checkpoint.get("actor_head", DEFAULT_ACTOR_HEAD),
+        checkpoint.get("actor_head", LEGACY_ACTOR_HEAD),
     )
 
 
@@ -322,7 +346,7 @@ class PPO:
         self.gae_lambda = gae_lambda
         self.actor_layers = actor_layers
         # The feed-forward actor has a single head.
-        self.actor_head = actor_head if network == "graph" else DEFAULT_ACTOR_HEAD
+        self.actor_head = actor_head if network == "graph" else LEGACY_ACTOR_HEAD
         self.actor = build_actor(
             network, actor_layers, self.actor_head
         ).to(DEVICE)
@@ -434,7 +458,7 @@ class PPO:
                 f"actor, but this run uses {self.actor_layers}"
             )
         _reject_global_fusion(checkpoint, path)
-        saved_head = checkpoint.get("actor_head", DEFAULT_ACTOR_HEAD)
+        saved_head = checkpoint.get("actor_head", LEGACY_ACTOR_HEAD)
         if saved_head != self.actor_head:
             raise ValueError(
                 f"{path} has actor_head={saved_head}, but this run uses "

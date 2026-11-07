@@ -68,8 +68,17 @@ ACTION_LAYERS = 2
 # per layer at 4x. 2x halves that compute and that activation memory. The
 # first transformer run (20261104-230947, 4x) used 512.
 FFN_SIZE = 2 * HIDDEN_SIZE
-# The usual transformer init for learned embeddings.
+# The usual transformer init for learned embeddings (used for action_emb).
 EMBED_INIT_STD = 0.02
+# Init std for pos_emb, the per-board-token position embedding. It is added to
+# the board tokens, and the node tokens come out of GraphEncoder's final
+# LayerNorm with about std 1 per element. At 0.02 (run 20261105-222120) the
+# position was about 2% of each token, so tokens with similar content (empty
+# nodes, empty roads) looked almost the same to the attention, and an action
+# token had little to tell "node 17" from "node 18" with. That makes learning
+# where to look slow. At 1.0 the position is as large as the content from the
+# start, so each board token is distinct, while still learned, not hand-wired.
+POS_EMB_INIT_STD = 1.0
 # What the two transformers compute in on the GPU. bfloat16 keeps float32's
 # exponent range (so no overflow or loss scaling, unlike float16) with an
 # 8-bit mantissa: about 2-3 significant digits. That's fine inside the
@@ -185,7 +194,7 @@ class TransformerActor(nn.Module):
 
         self.readout = nn.Linear(HIDDEN_SIZE, 1)
 
-        nn.init.normal_(self.pos_emb.weight, std=EMBED_INIT_STD)
+        nn.init.normal_(self.pos_emb.weight, std=POS_EMB_INIT_STD)
         nn.init.normal_(self.action_emb.weight, std=EMBED_INIT_STD)
         nn.init.zeros_(self.readout.weight)
         nn.init.zeros_(self.readout.bias)

@@ -2,6 +2,7 @@ use arrayvec::ArrayVec;
 use std::array::from_fn;
 
 use crate::action::DevCard;
+use crate::bayesian_estimate::OtherPlayerCardEstimates;
 use crate::game_viewer::render_board;
 use crate::reward::Reward;
 use crate::reward::VictoryPoint;
@@ -133,6 +134,7 @@ pub struct Game {
 
     current_player: usize,
     players: ArrayVec<Player, 4>,
+    other_player_card_estimates: OtherPlayerCardEstimates,
 
     game_detail: GameDetail,
 
@@ -150,6 +152,7 @@ impl Game {
         Self {
             board: Board::new_from_rand(&mut rng),
             players: ArrayVec::from(from_fn(|i| Player::new(i.into()))),
+            other_player_card_estimates: OtherPlayerCardEstimates::default(),
             current_player: 0,
             dev_cards: ArrayVec::from([14, 5, 2, 2, 2]),
             game_detail: GameDetail::new(),
@@ -448,8 +451,10 @@ impl Game {
                         }
                     }
                 } else {
-                    current_player.cards[Resource::Brick as usize] -= 1;
-                    current_player.cards[Resource::Lumber as usize] -= 1;
+                    self.spend_resources(&[
+                        (Resource::Brick, 1),
+                        (Resource::Lumber, 1),
+                    ]);
                 }
 
                 should_recompute_vp = true;
@@ -471,8 +476,17 @@ impl Game {
                                     .get_resources_near_node_id(node_id);
 
                                 let current_player = self.current_player_mut();
+                                init_resources.iter().for_each(|r| {
+                                    current_player.add_resource_card(*r, 1);
+                                });
+
                                 init_resources.into_iter().for_each(|r| {
-                                    current_player.add_resource_card(r, 1);
+                                    self.other_player_card_estimates
+                                        .observe_gain_resource(
+                                            self.current_player_id(),
+                                            r,
+                                            1,
+                                        );
                                 });
                             }
 
@@ -484,12 +498,12 @@ impl Game {
                             self.state =
                                 GameState::InitialBoardSetup(current_order + 1);
                         } else {
-                            let current_player = self.current_player_mut();
-                            current_player.cards[Resource::Brick as usize] -= 1;
-                            current_player.cards[Resource::Lumber as usize] -=
-                                1;
-                            current_player.cards[Resource::Grain as usize] -= 1;
-                            current_player.cards[Resource::Wool as usize] -= 1;
+                            self.spend_resources(&[
+                                (Resource::Brick, 1),
+                                (Resource::Lumber, 1),
+                                (Resource::Grain, 1),
+                                (Resource::Wool, 1),
+                            ]);
                         }
                     }
                     Building::City => {
@@ -497,8 +511,10 @@ impl Game {
                         current_player.num_city += 1;
                         current_player.num_settlement -= 1;
 
-                        current_player.cards[Resource::Grain as usize] -= 2;
-                        current_player.cards[Resource::Ore as usize] -= 3;
+                        self.spend_resources(&[
+                            (Resource::Grain, 2),
+                            (Resource::Ore, 3),
+                        ]);
                     }
                 }
 
@@ -511,12 +527,16 @@ impl Game {
                 should_recompute_vp = true;
             }
             Action::MaritimeTrade(lose, get) => {
-                let current_player = self.current_player_mut();
-                current_player.cards[lose.0 as usize] -= lose.1;
-                current_player.cards[get as usize] += 1;
+                self.spend_resources(&[(lose.0, lose.1)]);
+                self.current_player_mut().add_resource_card(get, 1);
+                self.other_player_card_estimates.observe_gain_resource(
+                    self.current_player_id(),
+                    get,
+                    1,
+                );
             }
             Action::DiscardResource(resource) => {
-                self.current_player_mut().cards[resource as usize] -= 1;
+                self.spend_resources(&[(resource, 1)]);
 
                 // Advance the discard sub-state-machine here (used to live
                 // inside get_actions). If somebody else still needs to
@@ -549,10 +569,16 @@ impl Game {
                 let player = &mut self.players[target_player];
                 if player.num_resource_cards() > 0 {
                     let r = choose_weighted(&player.cards[0..5], &mut self.rng);
-                    player.use_resource_card(Resource::ALL[r], 1);
 
-                    self.current_player_mut()
-                        .add_resource_card(Resource::ALL[r], 1);
+                    // Target player loses the card; current player gains it.
+                    let resource = Resource::ALL[r];
+                    player.use_resource_card(resource, 1);
+                    self.current_player_mut().add_resource_card(resource, 1);
+                    self.other_player_card_estimates.observe_steal(
+                        self.current_player_id(),
+                        PlayerId::from(target_player),
+                        resource,
+                    );
                 }
                 self.state = GameState::ContinueAction;
             }
@@ -570,11 +596,12 @@ impl Game {
             Action::BuyDevCard => {
                 let dev_card = self.get_random_dev_card();
 
-                let current_player = self.current_player_mut();
-                current_player.cards[Resource::Ore as usize] -= 1;
-                current_player.cards[Resource::Grain as usize] -= 1;
-                current_player.cards[Resource::Wool as usize] -= 1;
-                current_player.add_dev_card(dev_card);
+                self.spend_resources(&[
+                    (Resource::Ore, 1),
+                    (Resource::Grain, 1),
+                    (Resource::Wool, 1),
+                ]);
+                self.current_player_mut().add_dev_card(dev_card);
 
                 if dev_card == DevCard::VictoryPoint {
                     should_recompute_vp = true;
@@ -634,6 +661,11 @@ impl Game {
             Action::YearOfPlentyGetResource(resource) => {
                 let current_player = self.current_player_mut();
                 current_player.add_resource_card(resource, 1);
+                self.other_player_card_estimates.observe_gain_resource(
+                    self.current_player_id(),
+                    resource,
+                    1,
+                );
 
                 if let GameState::UsedDevCard((
                     DevCard::YearOfPlenty,
@@ -670,6 +702,16 @@ impl Game {
 
                 self.current_player_mut()
                     .add_resource_card(resource, total_cards);
+
+                self.other_player_card_estimates.observe_monopoly(
+                    current_player_id,
+                    resource,
+                    &self
+                        .players
+                        .iter()
+                        .map(|p| p.num_resource_cards())
+                        .collect::<Vec<_>>(),
+                );
 
                 self.state = GameState::ContinueAction;
             }
@@ -777,6 +819,8 @@ impl Game {
 
         for (player, resource, num) in resources {
             self.players[usize::from(player)].add_resource_card(resource, num);
+            self.other_player_card_estimates
+                .observe_gain_resource(player, resource, num);
         }
     }
 
@@ -897,6 +941,18 @@ impl Game {
         }
     }
 
+    // Remove `cost` from the current player's hand and let every other
+    // player's card estimate know which cards were spent (spending is public).
+    fn spend_resources(&mut self, cost: &[(Resource, u8)]) {
+        let player_id = self.current_player_id();
+        for &(resource, count) in cost {
+            self.players[usize::from(player_id)]
+                .use_resource_card(resource, count);
+            self.other_player_card_estimates
+                .observe_discard_resource(player_id, resource, count);
+        }
+    }
+
     fn current_player_mut(&mut self) -> &mut Player {
         let player_id = usize::from(self.current_player_id());
         &mut self.players[player_id]
@@ -926,6 +982,7 @@ mod tests {
         Game {
             board: Board::new(&[]),
             players: ArrayVec::from(from_fn(|i| Player::new(i.into()))),
+            other_player_card_estimates: OtherPlayerCardEstimates::default(),
             current_player: 0,
             dev_cards: ArrayVec::from([0; 5]),
             game_detail: GameDetail::new(),
@@ -1101,6 +1158,101 @@ mod tests {
         assert_eq!(game.players[0].cards[Resource::Ore as usize], 1);
     }
 
+    // ---- Card estimate tests ----
+
+    /// Give player 0 `hand`, both for real and in every opponent's estimate.
+    fn game_with_estimated_hand(hand: &[(Resource, u8)]) -> Game {
+        let mut game = game_with_empty_board();
+        game.other_player_card_estimates = OtherPlayerCardEstimates::new(true);
+        for &(resource, count) in hand {
+            game.players[0].add_resource_card(resource, count);
+            game.other_player_card_estimates.observe_gain_resource(
+                p(0),
+                resource,
+                count,
+            );
+        }
+        game
+    }
+
+    /// Hand size of player 0 as estimated by each opponent.
+    fn estimated_sizes_of_player_0(game: &Game) -> Vec<u8> {
+        (1..4)
+            .map(|observer| {
+                let relative = RelativePlayerId::from(p(observer), p(0));
+                game.other_player_card_estimates.estimates[observer]
+                    [usize::from(relative) - 1]
+                    .get_num_cards()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn estimates_see_road_cost() {
+        let mut game = game_with_estimated_hand(&[
+            (Resource::Brick, 1),
+            (Resource::Lumber, 2),
+        ]);
+        game.run_action(Action::BuildRoad(RoadId::new(0)));
+        assert_eq!(estimated_sizes_of_player_0(&game), vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn estimates_see_settlement_cost() {
+        let mut game = game_with_estimated_hand(&[
+            (Resource::Brick, 1),
+            (Resource::Lumber, 1),
+            (Resource::Grain, 1),
+            (Resource::Wool, 2),
+        ]);
+        game.run_action(Action::BuildStructure(
+            Building::Settlement,
+            NodeId::new(5),
+        ));
+        assert_eq!(estimated_sizes_of_player_0(&game), vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn estimates_see_city_cost() {
+        let mut game = game_with_estimated_hand(&[
+            (Resource::Grain, 2),
+            (Resource::Ore, 4),
+        ]);
+        game.players[0].num_settlement = 1;
+        game.run_action(Action::BuildStructure(Building::City, NodeId::new(5)));
+        assert_eq!(estimated_sizes_of_player_0(&game), vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn estimates_see_dev_card_cost() {
+        let mut game = game_with_estimated_hand(&[
+            (Resource::Ore, 1),
+            (Resource::Grain, 1),
+            (Resource::Wool, 1),
+        ]);
+        game.dev_cards = ArrayVec::from([1; 5]);
+        game.run_action(Action::BuyDevCard);
+        assert_eq!(estimated_sizes_of_player_0(&game), vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn estimates_see_maritime_trade() {
+        let mut game = game_with_estimated_hand(&[(Resource::Wool, 4)]);
+        game.run_action(Action::MaritimeTrade(
+            (Resource::Wool, 4),
+            Resource::Ore,
+        ));
+        // Gave 4 wool, got 1 ore.
+        assert_eq!(estimated_sizes_of_player_0(&game), vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn estimates_see_discard() {
+        let mut game = game_with_estimated_hand(&[(Resource::Brick, 3)]);
+        game.run_action(Action::DiscardResource(Resource::Brick));
+        assert_eq!(estimated_sizes_of_player_0(&game), vec![2, 2, 2]);
+    }
+
     // ---- Initial board setup tests ----
 
     #[test]
@@ -1222,6 +1374,7 @@ mod tests {
         let mut game = Game {
             board: Board::new(&[(5, TileType::Forest)]),
             players: ArrayVec::from(from_fn(|i| Player::new(i.into()))),
+            other_player_card_estimates: OtherPlayerCardEstimates::default(),
             current_player: 0,
             dev_cards: ArrayVec::from([0; 5]),
             game_detail: GameDetail::new(),
@@ -1245,6 +1398,7 @@ mod tests {
         let mut game = Game {
             board: Board::new(&[(8, TileType::Mountains)]),
             players: ArrayVec::from(from_fn(|i| Player::new(i.into()))),
+            other_player_card_estimates: OtherPlayerCardEstimates::default(),
             current_player: 0,
             dev_cards: ArrayVec::from([0; 5]),
             game_detail: GameDetail::new(),
@@ -1288,6 +1442,7 @@ mod tests {
         let mut game = Game {
             board: Board::new(&[(2, TileType::Desert), (5, TileType::Forest)]),
             players: ArrayVec::from(from_fn(|i| Player::new(i.into()))),
+            other_player_card_estimates: OtherPlayerCardEstimates::default(),
             // current_player tracks the active discarder while in Dice7Rolled
             // (set by roll_dice_for_current_player when 7 is rolled). Player
             // 1 has the most cards over their target, so they discard first.
@@ -1315,11 +1470,9 @@ mod tests {
 
         // Player 1 (8 cards, target 4) should discard first.
         let actions = game.get_actions();
-        assert!(
-            actions
-                .iter()
-                .all(|a| matches!(a, Action::DiscardResource(_)))
-        );
+        assert!(actions
+            .iter()
+            .all(|a| matches!(a, Action::DiscardResource(_))));
         assert_eq!(game.current_player, 1);
 
         game.run_action(Action::DiscardResource(Resource::Brick));
@@ -1336,11 +1489,9 @@ mod tests {
 
         // Player 2 (9 cards, target 5) should discard next.
         let actions = game.get_actions();
-        assert!(
-            actions
-                .iter()
-                .all(|a| matches!(a, Action::DiscardResource(_)))
-        );
+        assert!(actions
+            .iter()
+            .all(|a| matches!(a, Action::DiscardResource(_))));
         assert_eq!(game.current_player, 2);
 
         game.run_action(Action::DiscardResource(Resource::Ore));
@@ -1453,6 +1604,7 @@ mod tests {
         let mut game = Game {
             board: Board::new(&[(2, TileType::Desert), (5, TileType::Forest)]),
             players: ArrayVec::from(from_fn(|i| Player::new(i.into()))),
+            other_player_card_estimates: OtherPlayerCardEstimates::default(),
             current_player: 0,
             dev_cards: ArrayVec::from([0; 5]),
             game_detail: GameDetail::new(),
@@ -1476,6 +1628,7 @@ mod tests {
         let mut game = Game {
             board: Board::new(&[(2, TileType::Desert), (5, TileType::Forest)]),
             players: ArrayVec::from(from_fn(|i| Player::new(i.into()))),
+            other_player_card_estimates: OtherPlayerCardEstimates::default(),
             current_player: 0,
             dev_cards: ArrayVec::from([0; 5]),
             game_detail: GameDetail::new(),
@@ -1498,9 +1651,7 @@ mod tests {
             actions,
             vec![Action::StealCard(RelativePlayerId::from(p(0), p(1)))]
         );
-        game.run_action(Action::StealCard(
-            RelativePlayerId::from(p(0), p(1)),
-        ));
+        game.run_action(Action::StealCard(RelativePlayerId::from(p(0), p(1))));
 
         assert_eq!(game.players[0].num_resource_cards(), 1);
         assert_eq!(game.players[1].num_resource_cards(), 0);
@@ -1616,11 +1767,9 @@ mod tests {
         game.run_action(Action::UseDevCard(DevCard::YearOfPlenty));
 
         let actions = game.get_actions();
-        assert!(
-            actions
-                .iter()
-                .all(|a| matches!(a, Action::YearOfPlentyGetResource(_)))
-        );
+        assert!(actions
+            .iter()
+            .all(|a| matches!(a, Action::YearOfPlentyGetResource(_))));
         game.run_action(Action::YearOfPlentyGetResource(Resource::Ore));
 
         let actions = game.get_actions();
@@ -1862,6 +2011,7 @@ mod tests {
         let mut game = Game {
             board: Board::new(&[(2, TileType::Desert), (5, TileType::Forest)]),
             players: ArrayVec::from(from_fn(|i| Player::new(i.into()))),
+            other_player_card_estimates: OtherPlayerCardEstimates::default(),
             current_player: 0,
             dev_cards: ArrayVec::from([0; 5]),
             game_detail: GameDetail::new(),

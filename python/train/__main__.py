@@ -81,9 +81,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--actor-head",
         choices=ACTOR_HEADS,
-        help="how the graph actor scores actions. entity: a road from its two "
-        "end nodes, a settlement or city from its node, everything else from a "
-        "pooled board summary. transformer: a board transformer over the node, "
+        help="how the graph actor scores actions. entity-robber: a road from "
+        "its two end nodes, a settlement or city from its node, a robber move "
+        "from its tile's six corners, everything else from a pooled board "
+        "summary. entity: the same, but robber moves come from the pooled "
+        "summary too (graph runs up to 2026-11-06). transformer: a board transformer over the node, "
         "road and global tokens, then learned action tokens that read the board "
         "through cross-attention; each logit is read from its action token. "
         f"Slower; runs its transformers in bfloat16 on the GPU (default: {DEFAULT_ACTOR_HEAD}, or the resumed run's)",

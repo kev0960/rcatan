@@ -24,6 +24,7 @@ pub use state::FullState;
 pub use state::Phase;
 pub use state::State;
 pub use table::ROAD_TO_NODES;
+pub use table::TILE_TO_NODE;
 pub use util::id::NodeId;
 pub use util::id::PlayerId;
 pub use util::id::RelativePlayerId;

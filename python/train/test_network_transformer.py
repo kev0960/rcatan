@@ -78,7 +78,11 @@ def test_every_parameter_is_trained(endpoints, states):
 
 def test_batch_rows_are_independent(endpoints, states):
     actor = _with_random_readout(TransformerActor(endpoints)).eval()
-    torch.testing.assert_close(actor(states)[2:3], actor(states[2:3]))
+    # Batched and single-row matmuls round differently (about 1e-5 here with
+    # pos_emb at std 1). Rows leaking into each other would differ by far more.
+    torch.testing.assert_close(
+        actor(states)[2:3], actor(states[2:3]), atol=1e-4, rtol=1e-4
+    )
 
 
 def test_ppo_checkpoint_round_trip(tmp_path):

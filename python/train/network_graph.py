@@ -32,6 +32,10 @@ GLOBAL_DIM = 12 + 96
 
 # Action space layout (see `action_to_index` in crates/engine_py/src/lib.rs).
 NUM_OTHER_ACTIONS = 120  # [180, 300): everything that isn't a road or building
+# Inside those: [180, 185) discard, then [185, 204) move the robber to tile
+# 0-18, then [204, 300) the rest (steal, trades, end turn, dev cards, ...).
+NUM_TILES = 19
+NUM_DISCARD_ACTIONS = 5
 
 HIDDEN_SIZE = 128
 NUM_LAYERS = 3
@@ -117,9 +121,23 @@ POOLED_DIM = 2 * HIDDEN_SIZE + GLOBAL_DIM
 class GraphActor(nn.Module):
     """Policy over the 300 actions. Each action is scored by the part of the
     board it acts on: a road by its two end nodes, a settlement or city by its
-    node, and everything else by a pooled summary of the whole board."""
+    node, and everything else by a pooled summary of the whole board.
 
-    def __init__(self, road_endpoints: torch.Tensor, num_layers: int = NUM_LAYERS):
+    With `tile_nodes` (the "entity-robber" head), the 19 robber moves are also
+    scored by the part of the board they act on: each tile from its six corner
+    nodes. Without it (the "entity" head, every run up to 2026-11-06), they
+    come from the pooled summary like the other 120 actions. That summary is
+    the same for every tile, so the pooled head had to learn, separately for
+    each of the 19 outputs, which spot on the board its tile is; and what it
+    learned about blocking one tile did not carry over to any other.
+    """
+
+    def __init__(
+        self,
+        road_endpoints: torch.Tensor,
+        num_layers: int = NUM_LAYERS,
+        tile_nodes: torch.Tensor | None = None,
+    ):
         super().__init__()
         self.encoder = GraphEncoder(road_endpoints, num_layers)
 
@@ -132,10 +150,33 @@ class GraphActor(nn.Module):
         )
         # Per node: [settlement, city].
         self.node_head = nn.Linear(HIDDEN_SIZE, 2)
+
+        num_pooled = NUM_OTHER_ACTIONS
+        self.robber_head = None
+        if tile_nodes is not None:
+            corners = torch.as_tensor(tile_nodes, dtype=torch.long)
+            assert corners.shape == (NUM_TILES, 6)
+            # Not persistent: board data, like road_endpoints.
+            self.register_buffer("tile_nodes", corners, persistent=False)
+            # One function shared by all 19 tiles, like node_head for the 54
+            # nodes. Its input is [mean, max] over the tile's six corners:
+            # order-free, since a tile's corners have no natural order. The
+            # mean says how much is built around the tile, the max catches a
+            # single standout corner (e.g. the leader's city). The globals add
+            # the scores and hands, i.e. who is worth blocking. Corners already
+            # see the dice numbers and the robber's current tile in their
+            # node features.
+            self.robber_head = nn.Sequential(
+                nn.Linear(2 * HIDDEN_SIZE + GLOBAL_DIM, HIDDEN_SIZE),
+                nn.ReLU(),
+                nn.Linear(HIDDEN_SIZE, 1),
+            )
+            num_pooled -= NUM_TILES
+
         self.pooled_head = nn.Sequential(
             nn.Linear(POOLED_DIM, HIDDEN_SIZE),
             nn.ReLU(),
-            nn.Linear(HIDDEN_SIZE, NUM_OTHER_ACTIONS),
+            nn.Linear(HIDDEN_SIZE, num_pooled),
         )
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
@@ -149,6 +190,29 @@ class GraphActor(nn.Module):
 
         node_logits = self.node_head(h)
         other_logits = self.pooled_head(_pool(h, globals_))
+
+        if self.robber_head is not None:
+            # (B, 19, 6, H): the six corner embeddings of each tile.
+            corners = h[:, self.tile_nodes]
+            b = state.shape[0]
+            tile_input = torch.cat(
+                [
+                    corners.mean(dim=2),
+                    corners.amax(dim=2),
+                    globals_[:, None, :].expand(b, NUM_TILES, GLOBAL_DIM),
+                ],
+                dim=-1,
+            )
+            robber_logits = self.robber_head(tile_input).squeeze(-1)
+            # Put the robber moves back in their place, after the discards.
+            other_logits = torch.cat(
+                [
+                    other_logits[:, :NUM_DISCARD_ACTIONS],
+                    robber_logits,
+                    other_logits[:, NUM_DISCARD_ACTIONS:],
+                ],
+                dim=-1,
+            )
 
         # Concatenated in action-index order:
         #   [0, 72) roads, [72, 126) settlements, [126, 180) cities, [180, 300).

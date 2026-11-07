@@ -10,6 +10,7 @@ from train.network_graph import (
     NODE_FEATURES,
     NUM_NODES,
     NUM_ROADS,
+    NUM_TILES,
     ROADS,
     SETTLEMENTS,
     STATE_LEN,
@@ -29,6 +30,11 @@ from train.ppo import (
 @pytest.fixture
 def endpoints() -> torch.Tensor:
     return torch.from_numpy(Engine.road_endpoints())
+
+
+@pytest.fixture
+def tile_nodes() -> torch.Tensor:
+    return torch.from_numpy(Engine.tile_nodes())
 
 
 def _real_states(batch_size: int, steps: int = 40) -> torch.Tensor:
@@ -55,13 +61,14 @@ def test_output_shapes(endpoints):
     assert GraphCritic(endpoints)(states).shape == (5, 1)
 
 
-def test_heads_land_at_their_action_indices(endpoints):
-    actor = GraphActor(endpoints)
+@pytest.mark.parametrize("robber_head", [False, True])
+def test_heads_land_at_their_action_indices(endpoints, tile_nodes, robber_head):
+    actor = GraphActor(endpoints, tile_nodes=tile_nodes if robber_head else None)
+    heads = [(actor.road_head[-1], 3.0), (actor.pooled_head[-1], 4.0)]
+    if robber_head:
+        heads.append((actor.robber_head[-1], 5.0))
     with torch.no_grad():
-        for head, bias in [
-            (actor.road_head[-1], 3.0),
-            (actor.pooled_head[-1], 4.0),
-        ]:
+        for head, bias in heads:
             head.weight.zero_()
             head.bias.fill_(bias)
         actor.node_head.weight.zero_()
@@ -72,7 +79,49 @@ def test_heads_land_at_their_action_indices(endpoints):
     assert torch.all(logits[:, 0:72] == 3.0)  # BuildRoad
     assert torch.all(logits[:, 72:126] == 1.0)  # BuildStructure(Settlement)
     assert torch.all(logits[:, 126:180] == 2.0)  # BuildStructure(City)
-    assert torch.all(logits[:, 180:300] == 4.0)  # everything else
+    assert torch.all(logits[:, 180:185] == 4.0)  # DiscardResource
+    robber = 5.0 if robber_head else 4.0
+    assert torch.all(logits[:, 185:204] == robber)  # MoveRobber(tile 0-18)
+    assert torch.all(logits[:, 204:300] == 4.0)  # everything else
+
+
+def test_tile_nodes_match_the_board(endpoints, tile_nodes):
+    """Each tile is a hexagon: six distinct corners joined in a ring by six
+    roads. Every node is a corner of one to three tiles."""
+    assert tile_nodes.shape == (NUM_TILES, 6)
+    roads = {frozenset(r) for r in endpoints.tolist()}
+    for corners in tile_nodes.tolist():
+        assert len(set(corners)) == 6
+        assert sum(r <= set(corners) for r in roads) == 6
+    counts = torch.bincount(tile_nodes.flatten(), minlength=NUM_NODES)
+    assert counts.min() >= 1 and counts.max() <= 3
+
+
+def test_robber_moves_only_read_their_own_tile(endpoints, tile_nodes):
+    """A robber move's logit sees the board only through its tile's six
+    corner embeddings (and the globals): perturbing every other node's
+    embedding leaves it unchanged."""
+    torch.manual_seed(0)
+    actor = GraphActor(endpoints, tile_nodes=tile_nodes).eval()
+    states = _real_states(1)
+    tile = 4
+    corners = set(tile_nodes[tile].tolist())
+    others = [n for n in range(NUM_NODES) if n not in corners]
+
+    original_forward = actor.encoder.forward
+
+    def perturbed(state):
+        h, roads, globals_ = original_forward(state)
+        h = h.clone()
+        h[:, others] += torch.randn_like(h[:, others])
+        return h, roads, globals_
+
+    with torch.no_grad():
+        before = actor(states)
+        actor.encoder.forward = perturbed
+        after = actor(states)
+    torch.testing.assert_close(after[:, 185 + tile], before[:, 185 + tile])
+    assert not torch.allclose(after[:, 185:204], before[:, 185:204])
 
 
 def _permute_state(state, node_perm, road_perm):
@@ -93,7 +142,10 @@ def _permute_state(state, node_perm, road_perm):
     return out
 
 
-def test_relabeling_the_board_relabels_the_outputs(endpoints):
+@pytest.mark.parametrize("robber_head", [False, True])
+def test_relabeling_the_board_relabels_the_outputs(
+    endpoints, tile_nodes, robber_head
+):
     """The network has no notion of node or road ids, only of the graph. So
     relabeling nodes and roads (and swapping which end of a road is listed
     first) must relabel the outputs the same way and change nothing else."""
@@ -106,8 +158,11 @@ def test_relabeling_the_board_relabels_the_outputs(endpoints):
     relabeled[road_perm] = node_perm[endpoints]
     relabeled[road_perm[flip]] = relabeled[road_perm[flip]].flip(-1)
 
-    actor = GraphActor(endpoints).eval()
-    actor_relabeled = GraphActor(relabeled).eval()
+    # Tile ids stay; their corners are relabeled with the nodes.
+    tiles = tile_nodes if robber_head else None
+    tiles_relabeled = node_perm[tile_nodes] if robber_head else None
+    actor = GraphActor(endpoints, tile_nodes=tiles).eval()
+    actor_relabeled = GraphActor(relabeled, tile_nodes=tiles_relabeled).eval()
     actor_relabeled.load_state_dict(actor.state_dict())
     critic = GraphCritic(endpoints).eval()
     critic_relabeled = GraphCritic(relabeled).eval()
@@ -190,7 +245,8 @@ def test_ppo_smoke_and_checkpoint_round_trip(network, tmp_path):
         saved = torch.load(path, weights_only=True)
         saved["global_fusion"] = False
         torch.save(saved, path)
-    assert find_resume_checkpoint(tmp_path) == (path, network, 3, "entity")
+    head = "entity-robber" if network == "graph" else "entity"
+    assert find_resume_checkpoint(tmp_path) == (path, network, 3, head)
     loaded = load_actor(path, device="cpu")
     assert type(loaded) is type(ppo.actor)
 
@@ -206,7 +262,7 @@ def test_ppo_smoke_and_checkpoint_round_trip(network, tmp_path):
 
     training_path = tmp_path / TRAINING_STATE
     ppo.save_training_state(training_path, iteration=10)
-    assert find_resume_checkpoint(tmp_path) == (training_path, network, 3, "entity")
+    assert find_resume_checkpoint(tmp_path) == (training_path, network, 3, head)
     resumed = PPO(batch_size=4, network=network)
     assert resumed.load_checkpoint(training_path) == (10, True)
     torch.testing.assert_close(resumed.actor.state_dict(), ppo.actor.state_dict())
@@ -217,6 +273,34 @@ def test_ppo_smoke_and_checkpoint_round_trip(network, tmp_path):
     torch.testing.assert_close(
         resumed.critic_optimizer.state_dict(), ppo.critic_optimizer.state_dict()
     )
+
+
+def test_checkpoints_without_a_head_load_as_entity(tmp_path):
+    """Graph checkpoints from before the actor_head setting (230211, 115058,
+    ...) don't record one. They load as "entity", with the robber moves in
+    the pooled head, and resume as "entity"."""
+    ppo = PPO(batch_size=2, network="graph", actor_head="entity")
+    assert ppo.actor.robber_head is None
+    path = tmp_path / TRAINING_STATE
+    ppo.save_training_state(path, iteration=3)
+    saved = torch.load(path, weights_only=True)
+    del saved["actor_head"]
+    torch.save(saved, path)
+
+    assert find_resume_checkpoint(tmp_path)[3] == "entity"
+    assert PPO(batch_size=2, network="graph", actor_head="entity").load_checkpoint(
+        path
+    ) == (3, True)
+    with pytest.raises(ValueError, match="actor_head=entity"):
+        PPO(batch_size=2, network="graph").load_checkpoint(path)
+
+    actor_path = tmp_path / "actor.pt"
+    ppo.save_actor(actor_path)
+    saved = torch.load(actor_path, weights_only=True)
+    del saved["actor_head"]
+    torch.save(saved, actor_path)
+    loaded = load_actor(actor_path, device="cpu")
+    assert isinstance(loaded, GraphActor) and loaded.robber_head is None
 
 
 def test_global_fusion_checkpoints_are_rejected(tmp_path):

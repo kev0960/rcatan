@@ -38,11 +38,16 @@ Global fusion (pooling the board into every node after each convolution,
 Checkpoints trained with it no longer load; the others do.
 
 `--actor-head` picks how the graph actor turns the encoder's output into the
-300 action logits (default `entity`):
+300 action logits (default `entity-robber`):
 
-- `entity`: a road is scored from its two end nodes, a settlement or city
-  from its node, and everything else from a pooled summary of the board
-  (`GraphActor`).
+- `entity-robber`: a road is scored from its two end nodes, a settlement or
+  city from its node, a robber move from the six corner nodes of its tile,
+  and everything else from a pooled summary of the board (`GraphActor` with
+  `Engine.tile_nodes()`).
+- `entity`: the same, except the robber moves also come from the pooled
+  summary. Every graph run up to 2026-11-06 (e.g. 20261102-230211,
+  20261103-115058) used it, and checkpoints that don't record a head load as
+  `entity`.
 - `transformer`: a 2-layer transformer lets the 54 node, 72 road and one
   global token attend to each other. Then 300 learned action tokens go
   through 2 cross-attention layers: they read the board tokens but not each
@@ -63,7 +68,8 @@ passes whose gradients are added up before the step (gradient
 accumulation), so a big minibatch fits in GPU memory. Both are recorded in
 `config.json`.
 
-`--max-grad-norm` (default 0.5) scales the actor's and the critic's
+`--max-grad-norm` (default 2.0; 0.5 in 20261105-222120, where it clipped
+every step) scales the actor's and the critic's
 gradients down to that total norm before each optimizer step when they are
 above it, so no single update can be huge; 0 turns it off. Runs from before
 2026-11-05 had none. The train log records the norms before clipping
@@ -216,14 +222,17 @@ Running the profiler
 samply record uv run --no-sync python -m train
 ```
 
-Running the game server (API on port 8000). Override with `HOST` / `PORT`.
+Running the game server (API on port 8000, on all interfaces). Override with
+`HOST` / `PORT`; `HOST=127.0.0.1` keeps it to this machine.
 
 ```sh
 uv run python -m server
 ```
 
 Then, in another terminal, run the web UI from `web/` and open
-http://localhost:5173. Vite proxies `/games` and `/checkpoints` to port 8000.
+http://localhost:5173, or `http://<tailscale-ip-or-name>:5173` from another
+device. Vite listens on all interfaces and proxies `/games`, `/checkpoints`
+and `/training` to port 8000 on this machine.
 
 ```sh
 cd ../web
