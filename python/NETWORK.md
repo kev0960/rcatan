@@ -21,7 +21,7 @@ Common to all transformer runs:
 - Linear learning-rate decay from 1e-4 to 3e-5 over 600 iterations.
 - Baseline: 20261102-230211.
 
-### 20261106-075928: larger pos_emb init, looser gradient clipping (in progress)
+### 20261106-075928: larger pos_emb init, looser gradient clipping
 
 - **Tests:** whether the transformer learns faster per sample when its
   board tokens are easy to tell apart, while still learning (not
@@ -93,6 +93,41 @@ Common to all transformer runs:
 actor head scores roads from their two end nodes, settlements and cities from
 their node, and the other actions from a summary of the board. The actor and
 critic are separate networks.
+
+### 20261106-221927: robber head (`entity-robber`)
+
+- **Tests:** whether robber moves score better from the tile they target
+  than from the pooled board summary. In the old entity head, all 19 robber
+  moves came from the same pooled vector, so the head could not tell one tile
+  from another except through 19 separate output weights.
+- **Changes from 115058:**
+  - `--actor-head entity-robber` (now the default): each robber move is
+    scored from the mean and max of its tile's 6 corner nodes plus the global
+    features (`robber_head`).
+  - `--max-grad-norm` 2.0 (115058 had no clipping). Almost no steps were
+    clipped (under 1%), so this should not have changed the outcome.
+  - Built on a tree that already had the card estimate in the engine, but
+    the estimate is not in the state yet, so the actor could not see it.
+- **Result:**
+  - vs baseline (fully trained 230211): 23.4% average over iterations
+    501-600, the best of any run against this baseline (115058: 21.7%,
+    transformer 075928: 18.5%). Ahead of 115058 in 5 of the 6
+    100-iteration blocks (9.9% vs 8.0%, 15.8 vs 13.2, 17.7 vs 18.8,
+    19.9 vs 17.7, 21.3 vs 19.3, 23.4 vs 21.7), and still rising at the end.
+  - Games against random bots are shorter (154 steps vs 158).
+  - Entropy ended lower (0.26 vs 0.29); KL, clip fraction and explained
+    variance were close to 115058's.
+  - 3 h 13 min.
+- **Head-to-head vs 230211** (`train.compare`, 10000 games per matchup):
+  - 1 221927 vs 3 230211: 22.5% ± 0.8% (parity 25%).
+  - 1 230211 vs 3 221927: 18.5% ± 0.8% (parity 25%).
+  - 2 vs 2: 53.3% ± 1.0% for 221927 (parity 50%).
+  - Whichever policy is alone at the table loses, so the 1 vs 3 numbers
+    include a penalty for being the odd one out. With both lone results
+    compared, 221927 does 4 points better as the lone player, and it wins the
+    2 vs 2. The validation "vs baseline" check is always 1 vs 3, so it
+    understates this run.
+- **Verdict:** the first run to beat 230211, by a small margin.
 
 ### 20261103-224739: flat actor head
 
