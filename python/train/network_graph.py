@@ -18,17 +18,32 @@ from train.dense_conv import DenseTransformerConv
 
 NUM_NODES = 54
 NUM_ROADS = 72
-STATE_LEN = 2016
+STATE_LEN = 2031
+# The state before the card estimates were appended (2026-11-07). Checkpoints
+# trained on it (230211, 115058, 221927, ...) still load: their networks read
+# only the first 2016 floats.
+LEGACY_STATE_LEN = 2016
 
 ROADS = slice(0, 288)  # 72 * owner one-hot[4]
 SETTLEMENTS = slice(288, 504)  # 54 * owner one-hot[4]
 CITIES = slice(504, 720)  # 54 * owner one-hot[4]
 NODE_FEATURES = slice(732, 1920)  # 54 * [22]: production, robber, port
-GLOBALS = (slice(720, 732), slice(1920, 2016))  # 12 + 96 per-game values
+# Per-game values: 12, then everything from 1920 to the end of the state
+# (96, plus 15 card estimates on the current state).
+GLOBALS_HEAD = slice(720, 732)
+GLOBALS_TAIL_START = 1920
 
 ROAD_DIM = 4
 NODE_DIM = 4 + 4 + 22
-GLOBAL_DIM = 12 + 96
+
+
+def global_dim(state_len: int = STATE_LEN) -> int:
+    """Global features per game: 123 on the current state, 108 on the
+    legacy one."""
+    return GLOBALS_HEAD.stop - GLOBALS_HEAD.start + state_len - GLOBALS_TAIL_START
+
+
+GLOBAL_DIM = global_dim()
 
 # Action space layout (see `action_to_index` in crates/engine_py/src/lib.rs).
 NUM_OTHER_ACTIONS = 120  # [180, 300): everything that isn't a road or building
@@ -43,8 +58,9 @@ NUM_HEADS = 4
 
 
 def split_state(state: torch.Tensor):
-    """Split a (B, 2016) state into node (B, 54, 30), road (B, 72, 4) and
-    global (B, 108) features."""
+    """Split a (B, STATE_LEN) state into node (B, 54, 30), road (B, 72, 4) and
+    global (B, GLOBAL_DIM) features. A legacy (B, 2016) state gives 108
+    globals."""
     b = state.shape[0]
     roads = state[:, ROADS].view(b, NUM_ROADS, ROAD_DIM)
     nodes = torch.cat(
@@ -55,7 +71,9 @@ def split_state(state: torch.Tensor):
         ],
         dim=-1,
     )
-    globals_ = torch.cat([state[:, s] for s in GLOBALS], dim=-1)
+    globals_ = torch.cat(
+        [state[:, GLOBALS_HEAD], state[:, GLOBALS_TAIL_START:]], dim=-1
+    )
     return nodes, roads, globals_
 
 
@@ -66,8 +84,17 @@ class GraphEncoder(nn.Module):
     fixed (54, 3) table and the batch stays a plain (B, 54, H) tensor.
     """
 
-    def __init__(self, road_endpoints: torch.Tensor, num_layers: int = NUM_LAYERS):
+    def __init__(
+        self,
+        road_endpoints: torch.Tensor,
+        num_layers: int = NUM_LAYERS,
+        state_len: int = STATE_LEN,
+    ):
         super().__init__()
+        # The encoder reads only the first `state_len` floats, so a network
+        # built for the legacy state still runs on the current one.
+        self.state_len = state_len
+        self.global_dim = global_dim(state_len)
 
         endpoints = torch.as_tensor(road_endpoints, dtype=torch.long)
         assert endpoints.shape == (NUM_ROADS, 2)
@@ -76,7 +103,7 @@ class GraphEncoder(nn.Module):
 
         # Each node also sees the global features, so the player's hand,
         # score and phase shape the attention at every layer.
-        self.input = nn.Linear(NODE_DIM + GLOBAL_DIM, HIDDEN_SIZE)
+        self.input = nn.Linear(NODE_DIM + self.global_dim, HIDDEN_SIZE)
         self.convs = nn.ModuleList(
             DenseTransformerConv(
                 HIDDEN_SIZE,
@@ -94,12 +121,13 @@ class GraphEncoder(nn.Module):
 
     def forward(self, state: torch.Tensor):
         """Returns node embeddings (B, 54, H), road features (B, 72, 4) and
-        global features (B, 108)."""
-        nodes, roads, globals_ = split_state(state)
+        global features (B, global_dim)."""
+        nodes, roads, globals_ = split_state(state[:, : self.state_len])
         b = state.shape[0]
 
         x = torch.cat(
-            [nodes, globals_[:, None, :].expand(b, NUM_NODES, GLOBAL_DIM)], dim=-1
+            [nodes, globals_[:, None, :].expand(b, NUM_NODES, self.global_dim)],
+            dim=-1,
         )
         h = self.input(x)
 
@@ -115,7 +143,8 @@ def _pool(h: torch.Tensor, globals_: torch.Tensor) -> torch.Tensor:
     return torch.cat([h.mean(dim=1), h.amax(dim=1), globals_], dim=-1)
 
 
-POOLED_DIM = 2 * HIDDEN_SIZE + GLOBAL_DIM
+def pooled_dim(state_len: int = STATE_LEN) -> int:
+    return 2 * HIDDEN_SIZE + global_dim(state_len)
 
 
 class GraphActor(nn.Module):
@@ -137,9 +166,11 @@ class GraphActor(nn.Module):
         road_endpoints: torch.Tensor,
         num_layers: int = NUM_LAYERS,
         tile_nodes: torch.Tensor | None = None,
+        state_len: int = STATE_LEN,
     ):
         super().__init__()
-        self.encoder = GraphEncoder(road_endpoints, num_layers)
+        self.encoder = GraphEncoder(road_endpoints, num_layers, state_len)
+        g = self.encoder.global_dim
 
         # Symmetric in the two end nodes, so a road scores the same from either
         # end: [h_u + h_v, h_u * h_v, road features].
@@ -167,14 +198,14 @@ class GraphActor(nn.Module):
             # see the dice numbers and the robber's current tile in their
             # node features.
             self.robber_head = nn.Sequential(
-                nn.Linear(2 * HIDDEN_SIZE + GLOBAL_DIM, HIDDEN_SIZE),
+                nn.Linear(2 * HIDDEN_SIZE + g, HIDDEN_SIZE),
                 nn.ReLU(),
                 nn.Linear(HIDDEN_SIZE, 1),
             )
             num_pooled -= NUM_TILES
 
         self.pooled_head = nn.Sequential(
-            nn.Linear(POOLED_DIM, HIDDEN_SIZE),
+            nn.Linear(pooled_dim(state_len), HIDDEN_SIZE),
             nn.ReLU(),
             nn.Linear(HIDDEN_SIZE, num_pooled),
         )
@@ -199,7 +230,7 @@ class GraphActor(nn.Module):
                 [
                     corners.mean(dim=2),
                     corners.amax(dim=2),
-                    globals_[:, None, :].expand(b, NUM_TILES, GLOBAL_DIM),
+                    globals_[:, None, :].expand(b, NUM_TILES, globals_.shape[-1]),
                 ],
                 dim=-1,
             )
@@ -226,11 +257,11 @@ class GraphCritic(nn.Module):
     """State value from the current player's perspective. Has its own encoder,
     separate from the actor's."""
 
-    def __init__(self, road_endpoints: torch.Tensor):
+    def __init__(self, road_endpoints: torch.Tensor, state_len: int = STATE_LEN):
         super().__init__()
-        self.encoder = GraphEncoder(road_endpoints)
+        self.encoder = GraphEncoder(road_endpoints, state_len=state_len)
         self.value_head = nn.Sequential(
-            nn.Linear(POOLED_DIM, HIDDEN_SIZE),
+            nn.Linear(pooled_dim(state_len), HIDDEN_SIZE),
             nn.ReLU(),
             nn.Linear(HIDDEN_SIZE, 1),
         )

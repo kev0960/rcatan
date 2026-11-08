@@ -3,9 +3,9 @@ use numpy::{IntoPyArray, PyArray1, PyArray2};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rcatan::{
-    Action, Building, DevCard, Engine, FullState, Phase, PlayerId,
-    ROAD_TO_NODES, RelativePlayerId, Resource, State, TILE_TO_NODE, TileType,
-    port_at_node,
+    Action, Building, DevCard, Engine, FullState, OtherPlayerCardEstimates,
+    Phase, PlayerId, ROAD_TO_NODES, RelativePlayerId, Resource, State,
+    TILE_TO_NODE, TileType, port_at_node,
 };
 
 // Action space layout (300 total):
@@ -85,7 +85,7 @@ fn index_to_action(index: usize) -> Action {
     }
 }
 
-// State vector layout (1976 floats), encoded from the current player's perspective.
+// State vector layout (2031 floats), encoded from the current player's perspective.
 // "Rotated player index" = (player_id - current_player + 4) % 4, so index 0 is
 // always the current player, index 1 is the next player to act, etc.
 //
@@ -128,7 +128,14 @@ fn index_to_action(index: usize) -> Action {
 //   [2009, 2013) Longest road length / 15, rotated
 //   [2013, 2016) Other players' dev card counts (held + bought this turn) / 5,
 //                clipped, rotated so index 0 is the next player after current
-const STATE_VEC_LEN: usize = 2016;
+//   [2016, 2031) Other players' estimated resource counts: 3 * [5], rotated so
+//                index 0 is the next player after current, each in
+//                Resource::ALL order. Expected count / 10, clipped at 1 (the
+//                current player's own counts use the same scale). Estimated
+//                from public information only (see bayesian_estimate.rs).
+//                Added 2026-11-07: checkpoints trained on the 2016-float
+//                state read only the first 2016 floats.
+const STATE_VEC_LEN: usize = 2031;
 
 // Pips for dice numbers 2..=12: the number of two-dice combinations that roll
 // each number.
@@ -323,6 +330,13 @@ fn state_to_vec(state: State) -> Vec<f32> {
         v.push(((held + bought) as f32 / 5.0).min(1.0));
     }
 
+    // Other players' estimated resource counts, rotated (next player first).
+    for row in &state.card_estimates {
+        for &count in row {
+            v.push((count / 10.0).min(1.0));
+        }
+    }
+
     debug_assert_eq!(v.len(), STATE_VEC_LEN);
     v
 }
@@ -372,6 +386,17 @@ impl PyEngine {
         Array2::from_shape_vec((19, 6), flat)
             .expect("19 tiles with 6 corners each")
             .into_pyarray(py)
+    }
+
+    /// The port at each node, as ndarray (54,) i64: 0-4 for a 2:1 port in
+    /// Resource::ALL order (brick, lumber, ore, grain, wool), 5 for 3:1, -1
+    /// for none. Fixed across games (the engine's ports don't move).
+    #[staticmethod]
+    fn node_ports<'py>(py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+        let ports: Vec<i64> = (0..54u8)
+            .map(|n| port_at_node(n.into()).map_or(-1, |p| p as i64))
+            .collect();
+        ports.into_pyarray(py)
     }
 
     fn state<'py>(
@@ -682,6 +707,99 @@ fn full_state_to_dict<'py>(
 #[pymodule]
 fn catan_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEngine>()?;
+    m.add_class::<PyCardEstimator>()?;
     m.add("NUM_ACTIONS", NUM_ACTIONS)?;
     Ok(())
+}
+
+/// The engine's card estimator on its own, for games played outside the
+/// engine (e.g. bench/catanatron). Players are seats 0-3 and resources are
+/// indices into Resource::ALL (brick, lumber, ore, grain, wool). Feed it every
+/// public change to every hand; `expected_cards(observer)` then gives what
+/// `observer` can infer about the others, as the engine's state encodes it.
+#[pyclass(name = "CardEstimator")]
+struct PyCardEstimator {
+    inner: OtherPlayerCardEstimates,
+}
+
+fn resource_at(index: usize) -> PyResult<Resource> {
+    Resource::ALL.get(index).copied().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "resource index {index} out of range 0..5"
+        ))
+    })
+}
+
+fn seat(player: usize) -> PyResult<PlayerId> {
+    if player < 4 {
+        Ok(PlayerId::from(player))
+    } else {
+        Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "player {player} out of range 0..4"
+        )))
+    }
+}
+
+#[pymethods]
+impl PyCardEstimator {
+    #[new]
+    fn new() -> Self {
+        Self { inner: OtherPlayerCardEstimates::new(true) }
+    }
+
+    /// `player` gained `count` cards of `resource`, seen by everyone.
+    fn observe_gain(
+        &mut self,
+        player: usize,
+        resource: usize,
+        count: u8,
+    ) -> PyResult<()> {
+        self.inner
+            .observe_gain_resource(seat(player)?, resource_at(resource)?, count);
+        Ok(())
+    }
+
+    /// `player` lost `count` cards of `resource` (paid, traded, discarded or
+    /// taken by a monopoly), seen by everyone.
+    fn observe_spend(
+        &mut self,
+        player: usize,
+        resource: usize,
+        count: u8,
+    ) -> PyResult<()> {
+        self.inner.observe_discard_resource(
+            seat(player)?,
+            resource_at(resource)?,
+            count,
+        );
+        Ok(())
+    }
+
+    /// `thief` stole one `resource` from `victim`. Only the two of them see
+    /// which card it was.
+    fn observe_steal(
+        &mut self,
+        thief: usize,
+        victim: usize,
+        resource: usize,
+    ) -> PyResult<()> {
+        self.inner
+            .observe_steal(seat(thief)?, seat(victim)?, resource_at(resource)?);
+        Ok(())
+    }
+
+    /// What `observer` expects the others to hold, as ndarray (3, 5) f32:
+    /// rows in relative order (0 = the next player), columns in
+    /// Resource::ALL order.
+    fn expected_cards<'py>(
+        &self,
+        py: Python<'py>,
+        observer: usize,
+    ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let rows = self.inner.expected_cards(seat(observer)?);
+        let flat: Vec<f32> = rows.iter().flatten().copied().collect();
+        Ok(Array2::from_shape_vec((3, 5), flat)
+            .expect("3 opponents with 5 resources each")
+            .into_pyarray(py))
+    }
 }

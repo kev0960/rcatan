@@ -88,7 +88,11 @@ def parse_args() -> argparse.Namespace:
         "summary too (graph runs up to 2026-11-06). transformer: a board transformer over the node, "
         "road and global tokens, then learned action tokens that read the board "
         "through cross-attention; each logit is read from its action token. "
-        f"Slower; runs its transformers in bfloat16 on the GPU (default: {DEFAULT_ACTOR_HEAD}, or the resumed run's)",
+        "transformer-wired: the same, but each action token starts from the "
+        "board tokens it acts on (its road and end nodes, its node, its tile's "
+        "corners, or the global token). Both transformer heads are slower and "
+        "run in bfloat16 on the GPU "
+        f"(default: {DEFAULT_ACTOR_HEAD}, or the resumed run's)",
     )
     parser.add_argument(
         "--resume",
@@ -509,10 +513,10 @@ def main():
             "avg_steps_vs_75",
             "avg_vp_vs_75",
             "avg_opp_vp_vs_75",
-            "win_rate_vs_baseline",
-            "avg_steps_vs_baseline",
-            "avg_vp_vs_baseline",
-            "avg_opp_vp_vs_baseline",
+            "win_rate_vs_baseline_2v2",
+            "avg_steps_vs_baseline_2v2",
+            "avg_vp_vs_baseline_2v2",
+            "avg_opp_vp_vs_baseline_2v2",
         ],
     )
 
@@ -602,8 +606,8 @@ def main():
                     f"vp {val_metrics['avg_vp_vs_50']:.2f}/{val_metrics['avg_opp_vp_vs_50']:.2f} | "
                     f"vs 75%: win {val_metrics['win_rate_vs_75']:.2%} "
                     f"vp {val_metrics['avg_vp_vs_75']:.2f}/{val_metrics['avg_opp_vp_vs_75']:.2f} | "
-                    f"vs baseline: win {val_metrics['win_rate_vs_baseline']:.2%} "
-                    f"vp {val_metrics['avg_vp_vs_baseline']:.2f}/{val_metrics['avg_opp_vp_vs_baseline']:.2f} "
+                    f"2 vs 2 baseline: win {val_metrics['win_rate_vs_baseline_2v2']:.2%} "
+                    f"vp {val_metrics['avg_vp_vs_baseline_2v2']:.2f}/{val_metrics['avg_opp_vp_vs_baseline_2v2']:.2f} "
                     f"(random: {VALIDATE_MATCHES_RANDOM}, ckpt: {VALIDATE_MATCHES_CHECKPOINT} matches)"
                 )
                 val_writer.writerow(
@@ -621,10 +625,10 @@ def main():
                         f"{val_metrics['avg_steps_vs_75']:.2f}",
                         f"{val_metrics['avg_vp_vs_75']:.4f}",
                         f"{val_metrics['avg_opp_vp_vs_75']:.4f}",
-                        f"{val_metrics['win_rate_vs_baseline']:.6f}",
-                        f"{val_metrics['avg_steps_vs_baseline']:.2f}",
-                        f"{val_metrics['avg_vp_vs_baseline']:.4f}",
-                        f"{val_metrics['avg_opp_vp_vs_baseline']:.4f}",
+                        f"{val_metrics['win_rate_vs_baseline_2v2']:.6f}",
+                        f"{val_metrics['avg_steps_vs_baseline_2v2']:.2f}",
+                        f"{val_metrics['avg_vp_vs_baseline_2v2']:.4f}",
+                        f"{val_metrics['avg_opp_vp_vs_baseline_2v2']:.4f}",
                     ]
                 )
                 val_file.flush()

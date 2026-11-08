@@ -15,7 +15,7 @@ from pathlib import Path
 
 import torch
 
-from train.ppo import ACTOR_INPUT_SIZE, DEVICE, play_matches
+from train.ppo import DEVICE, LOADABLE_STATE_LENS, play_matches
 
 CHECKPOINT_ROOT = Path("checkpoints")
 LATEST = "actor_latest.pt"
@@ -31,13 +31,13 @@ def checkpoint_network(path: Path) -> tuple[str, int]:
 
 def latest_checkpoint(network: str, root: Path = CHECKPOINT_ROOT) -> Path:
     """Newest run (run dirs are timestamps) whose latest actor is `network`
-    and was trained on the current state size."""
+    and was trained on a state size that still loads."""
     for path in sorted(root.glob(f"*/{LATEST}"), reverse=True):
         net, state_len = checkpoint_network(path)
-        if net == network and state_len == ACTOR_INPUT_SIZE:
+        if net == network and state_len in LOADABLE_STATE_LENS:
             return path
     raise FileNotFoundError(
-        f"no {network} checkpoint with a {ACTOR_INPUT_SIZE}-float state in {root}"
+        f"no {network} checkpoint with a loadable state size in {root}"
     )
 
 

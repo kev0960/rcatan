@@ -106,12 +106,13 @@ function opponentsOf(table: MetricsTable): string[] {
 
 function opponentLabel(opp: string): string {
   if (/^\d+$/.test(opp)) return `vs ${opp}%`;
+  if (opp === "baseline_2v2") return "2 vs 2 baseline";
   return `vs ${opp}`;
 }
 
 // Stable color per opponent so the same opponent is the same color in every
 // chart and every run.
-const KNOWN_OPPONENTS = ["random", "50", "75", "90", "baseline"];
+const KNOWN_OPPONENTS = ["random", "50", "75", "90", "baseline", "baseline_2v2"];
 function opponentColor(opp: string, fallbackIndex: number): string {
   const i = KNOWN_OPPONENTS.indexOf(opp);
   return SERIES_COLORS[(i >= 0 ? i : KNOWN_OPPONENTS.length + fallbackIndex) % SERIES_COLORS.length];

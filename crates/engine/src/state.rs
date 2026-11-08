@@ -28,6 +28,10 @@ pub struct State {
     pub largest_army: Option<(PlayerId, u8)>,
     // Each player's longest road length.
     pub road_lengths: [u8; 4],
+    // The current player's estimate of the other players' hands: expected
+    // count of each resource, from public information only. Rows in relative
+    // order (index 0 = the next player).
+    pub card_estimates: [[f32; 5]; 3],
 }
 
 // A coarse phase tag that's stable to surface to external consumers (UI,

@@ -19,7 +19,45 @@ Common to all transformer runs:
   entity runs).
 - 128 games x 3000 steps per iteration, 2 actor passes, 1 critic pass.
 - Linear learning-rate decay from 1e-4 to 3e-5 over 600 iterations.
-- Baseline: 20261102-230211.
+- Baseline: 20261102-230211, except 194817 (20261107-155220, played 2 vs 2).
+
+### 20261107-194817: wired action tokens (`transformer-wired`)
+
+- **Tests:** whether the transformer catches up with the graph network when
+  each action token doesn't have to learn where on the board it acts.
+- **Changes from 075928:**
+  - `--actor-head transformer-wired`: each action token starts as its learned
+    vector plus the board tokens it acts on (a fixed 300 x 127 source
+    matrix). A road gets its road token and its two end nodes, a settlement
+    or city its node, a robber move its tile's six corners, and everything
+    else the global token. The attention still reads the whole board.
+  - The wired `action_emb` starts at std 1.0.
+  - The state has the card estimates (2031 floats), as in 155220.
+  - Baseline: the fully trained 155220, the best graph run, played 2 vs 2
+    (parity 50%) instead of 1 vs 3.
+  - Minibatch 4096 (2 micro-batches of 2048), gradient clipping at 2.0.
+- **Result:**
+  - vs baseline (2 vs 2): 9.0% average over iterations 1-50, 30.0% over
+    101-150, 40.8% over 201-250, 49.3% over 401-450 and 52.8% over 501-600.
+    It flattened only in the last 100 iterations. The earlier transformers
+    flattened around iteration 400.
+  - Entropy fell steadily: 0.36, 0.32, 0.28, 0.26 and 0.24 by 100-iteration
+    block, lower than the graph runs. KL went from 0.006 to 0.003 as the
+    learning rate decayed. Explained variance was about 0.63.
+  - Stopped by accident at iteration 160 and resumed with no break in the
+    curves.
+  - About 8 h 15 min, against 3 h 19 min for 155220 (about 2.5x slower).
+- **Head-to-head vs 155220** (`train.compare`, 5000 games per matchup):
+  - 1 194817 vs 3 155220: 24.3% ± 1.2% (parity 25%).
+  - 1 155220 vs 3 194817: 24.5% ± 1.2% (parity 25%).
+  - 2 vs 2: 50.0% ± 1.4% (parity 50%).
+  - Unlike every earlier pair, neither policy loses when it is alone at the
+    table.
+- **Verdict:** the first transformer to match the best graph run, but no
+  better, at 2.5x the training time. `entity-robber` stays the default. Two
+  different architectures ending at the same strength suggest the training
+  setup (self-play, reward, 600 iterations), not the network, is now the
+  limit.
 
 ### 20261106-075928: larger pos_emb init, looser gradient clipping
 
@@ -93,6 +131,37 @@ Common to all transformer runs:
 actor head scores roads from their two end nodes, settlements and cities from
 their node, and the other actions from a summary of the board. The actor and
 critic are separate networks.
+
+### 20261107-155220: bayesian estimation
+
+Include the bayesian estimation of the other player's card from the current
+player's perspective.
+
+```
+~/learn/rcatan/python on  main [!] took 56s
+❯  uv run --no-sync python -m train.compare 20261107-155220 20261102-230211 --matches 3000
+A: 20261107-155220 (graph)  [checkpoints/20261107-155220/actor_latest.pt]
+B: 20261102-230211 (graph)  [checkpoints/20261102-230211/actor_latest.pt]
+3000 games per matchup
+
+1 A vs 3 B: win  22.9% ± 1.5% (parity 25%)  | vp/seat 6.83 vs 7.14  | steps 221
+1 B vs 3 A: win  16.0% ± 1.3% (parity 25%)  | vp/seat 6.68 vs 7.27  | steps 230
+2 A vs 2 B: win  54.0% ± 1.8% (parity 50%)  | vp/seat 7.17 vs 6.99  | steps 226
+
+~/learn/rcatan/python on  main [!] took 55s
+❯  uv run --no-sync python -m train.compare 20261107-155220 20261106-221927 --matches 3000
+A: 20261107-155220 (graph)  [checkpoints/20261107-155220/actor_latest.pt]
+B: 20261106-221927 (graph)  [checkpoints/20261106-221927/actor_latest.pt]
+3000 games per matchup
+
+1 A vs 3 B: win  25.2% ± 1.6% (parity 25%)  | vp/seat 7.23 vs 7.21  | steps 230
+1 B vs 3 A: win  22.0% ± 1.5% (parity 25%)  | vp/seat 7.03 vs 7.28  | steps 234
+2 A vs 2 B: win  52.8% ± 1.8% (parity 50%)  | vp/seat 7.30 vs 7.16  | steps 233
+```
+
+Slightly better than previous runs 
+  - 53% advantage over the robber head fix.
+  - 54% advantage over the previous "best" graph.
 
 ### 20261106-221927: robber head (`entity-robber`)
 

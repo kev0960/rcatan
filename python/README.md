@@ -56,6 +56,12 @@ Checkpoints trained with it no longer load; the others do.
   the transformers run in bfloat16. It's several times slower to train than
   `entity`. Checkpoints from before 2026-11-05 (with action self-attention)
   no longer load.
+- `transformer-wired`: the same, but each action token starts from the board
+  tokens it acts on instead of only a learned vector: a road from its road
+  token and its two end nodes, a settlement or city from its node, a robber
+  move from its tile's six corners, and everything else from the global
+  token. The attention still reads the whole board; the action just doesn't
+  have to learn where its own spot is first.
 
 ```sh
 uv run python -m train --actor-head transformer \
@@ -190,7 +196,9 @@ torch.load("checkpoints/<timestamp>/actor_latest.pt", weights_only=True)["config
 
 To also play a checkpoint from another run during validation (for example,
 the feed-forward baseline while training the graph network), set
-`CATAN_BASELINE_CHECKPOINT`:
+`CATAN_BASELINE_CHECKPOINT`. It plays 2 trained seats vs 2 baseline seats
+(parity 50%), logged as `*_vs_baseline_2v2`. Runs before 2026-11-07 played
+1 vs 3 instead (parity 25%) and log `*_vs_baseline`:
 
 ```sh
 CATAN_BASELINE_CHECKPOINT=checkpoints/<timestamp>/actor_latest.pt \
@@ -209,6 +217,31 @@ uv run python -m train.compare 20261101-125508 checkpoints/20261101-123034/actor
 
 It plays 1 A vs 3 B and 1 B vs 3 A (parity 25%), then 2 A vs 2 B (parity
 50%), and prints each win rate with a 95% confidence interval.
+
+Benchmark a trained actor against [catanatron](https://github.com/bcollazo/catanatron)'s
+bots, in catanatron's engine (`bench/catanatron/`). Install it once (the
+`bench` dependency group, pinned to a GitHub commit; the PyPI release lacks
+the search bots):
+
+```sh
+uv pip install "catanatron @ git+https://github.com/bcollazo/catanatron.git@ecf931181b9a65bb4116a2153fb78c16f1438e00"
+uv run --no-sync python -m bench.catanatron 20261107-155220 --opponent AB:2 --games 200
+```
+
+`--opponent` is a catanatron player spec for the other seats: `R` (random),
+`W` (weighted random), `VP`, `F` (greedy on a hand-tuned evaluation), `AB:2`
+(alpha-beta search on it, the strongest and slowest: about 10 s per game),
+`M:100` (MCTS). `--seats 2` plays 2 vs 2 (parity 50%; default 1 vs 3, parity
+25%). Games run on the CPU in `--workers` processes.
+
+The bot rebuilds our engine's state vector from the catanatron game
+(`encode.py`, checked against the Rust encoder by `test_encode.py`), with the
+board matched to our node, road and tile ids (`board_map.py`), and plays the
+legal catanatron action our actor scores highest. Moves the two engines split
+differently (robber + steal, year of plenty, monopoly) are picked one step at
+a time as in our engine. The card estimates come from our engine's estimator,
+fed the hand changes a real player could see. It always rolls first (no dev
+cards before rolling, as in our engine) and rejects player trades.
 
 Running the tests.
 

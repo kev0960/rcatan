@@ -121,6 +121,14 @@ impl OtherPlayerCardEstimates {
         }
     }
 
+    /// What `observer` expects each other player to hold: the expected count
+    /// of each resource, indexed like `Resource::ALL`. Rows are in relative
+    /// order (index 0 = the next player after `observer`).
+    pub fn expected_cards(&self, observer: PlayerId) -> [[f32; 5]; 3] {
+        let row = &self.estimates[usize::from(observer)];
+        from_fn(|i| row[i].expected_cards())
+    }
+
     /// `thief` stole `resource` from `victim`. Only the two of them know
     /// which card moved; everyone else sees an unknown card change hands.
     pub fn observe_steal(
@@ -291,6 +299,22 @@ impl BayesianCardEstimate {
         }
 
         distribution
+    }
+
+    /// Expected count of each resource: sum over hands of P(hand) * count.
+    /// The counts add up to the hand size. All zero if every hand was ruled
+    /// out.
+    pub fn expected_cards(&self) -> [f32; 5] {
+        let mut expected = [0.0; 5];
+
+        for (card, probability) in &self.cards {
+            for resource in Resource::ALL {
+                expected[resource as usize] +=
+                    probability * card.count(resource) as f32;
+            }
+        }
+
+        expected
     }
 
     /// Gain one card whose resource follows `distribution` (indexed like
@@ -1002,6 +1026,43 @@ mod tests {
         assert_eq!(estimate.cards.len(), 2);
         assert_close(prob(&estimate, [1, 1, 0, 0, 0]), 0.75);
         assert_close(prob(&estimate, [0, 1, 1, 0, 0]), 0.25);
+    }
+
+    #[test]
+    fn expected_cards_average_over_hands() {
+        // {2B} and {B,O} each 0.5 -> 1.5 brick, 0.5 ore.
+        let mut estimate = BayesianCardEstimate::new();
+        estimate.observe_gain_resource(Resource::Brick, 1);
+        estimate.observe_gain_unknown_card(&[0.5, 0.0, 0.5, 0.0, 0.0]);
+
+        let expected = estimate.expected_cards();
+        assert_close(expected[Resource::Brick as usize], 1.5);
+        assert_close(expected[Resource::Ore as usize], 0.5);
+        assert_close(expected.iter().sum(), 2.0);
+
+        // Every hand ruled out: nothing expected.
+        let mut estimate = BayesianCardEstimate::new();
+        gain_cards(&mut estimate, &[1, 0, 0, 0, 0]);
+        estimate.observe_discard_resource(Resource::Ore, 1);
+        assert_close(estimate.expected_cards().iter().sum(), 0.0);
+    }
+
+    #[test]
+    fn expected_cards_are_in_relative_order() {
+        let mut estimates = OtherPlayerCardEstimates::new(true);
+        estimates.observe_gain_resource(
+            PlayerId::from(2usize),
+            Resource::Ore,
+            3,
+        );
+
+        // Player 1 sees player 2 as the next player, player 3 sees it as the
+        // third.
+        let from_1 = estimates.expected_cards(PlayerId::from(1usize));
+        assert_close(from_1[0][Resource::Ore as usize], 3.0);
+        let from_3 = estimates.expected_cards(PlayerId::from(3usize));
+        assert_close(from_3[2][Resource::Ore as usize], 3.0);
+        assert_close(from_3[0].iter().sum(), 0.0);
     }
 
     #[test]

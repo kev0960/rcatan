@@ -24,6 +24,7 @@ torchvision = [
   { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 catan-engine = { path = "../crates/engine_py", editable = true }
+catanatron = { git = "https://github.com/bcollazo/catanatron.git", rev = "ecf931181b9a65bb4116a2153fb78c16f1438e00" }
 
 [tool.uv]
 dev-dependencies = [
@@ -37,3 +38,8 @@ reinstall-package = ["catan-engine"]
 [tool.pyright]
 venvPath = "."
 venv = ".venv"
+
+[dependency-groups]
+bench = [
+    "catanatron",
+]

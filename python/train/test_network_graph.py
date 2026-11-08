@@ -7,6 +7,7 @@ from catan_engine import Engine
 
 from train.network_graph import (
     CITIES,
+    LEGACY_STATE_LEN,
     NODE_FEATURES,
     NUM_NODES,
     NUM_ROADS,
@@ -53,6 +54,49 @@ def _real_states(batch_size: int, steps: int = 40) -> torch.Tensor:
 def test_state_len_matches_engine():
     assert STATE_LEN == ACTOR_INPUT_SIZE
     assert _real_states(1, steps=0).shape == (1, STATE_LEN)
+
+
+def test_card_estimates_add_up_to_the_public_hand_sizes():
+    """The estimate of each opponent's hand ([2016, 2031), expected count /
+    10) must add up to its public hand size ([725, 728), total / 20), in the
+    same rotated order."""
+    states = _real_states(16, steps=300)
+    totals = states[:, 725:728] * 20
+    estimates = states[:, LEGACY_STATE_LEN:STATE_LEN].view(-1, 3, 5) * 10
+    # Both are clipped (20 cards in total, 10 of one resource); skip those.
+    unclipped = (totals < 20).all(-1) & (estimates < 10).all(-1).all(-1)
+    assert unclipped.sum() > 8
+    assert totals.sum() > 0
+    torch.testing.assert_close(
+        estimates.sum(-1)[unclipped], totals[unclipped], atol=1e-3, rtol=0
+    )
+
+
+def test_legacy_actors_ignore_the_card_estimates(tmp_path, endpoints, tile_nodes):
+    """Actors trained on the 2016-float state (230211, 115058, ...) still
+    load, and run on the current state by reading only its first 2016 floats."""
+    torch.manual_seed(0)
+    actor = GraphActor(endpoints, tile_nodes=tile_nodes, state_len=LEGACY_STATE_LEN)
+    path = tmp_path / "legacy.pt"
+    torch.save(
+        {
+            "network": "graph",
+            "num_layers": 3,
+            "actor_head": "entity-robber",
+            "state_len": LEGACY_STATE_LEN,
+            "state_dict": actor.state_dict(),
+        },
+        path,
+    )
+    loaded = load_actor(path, device="cpu")
+
+    states = _real_states(4)
+    noisy = states.clone()
+    noisy[:, LEGACY_STATE_LEN:] = torch.rand(4, STATE_LEN - LEGACY_STATE_LEN)
+    with torch.no_grad():
+        out = loaded(states)
+        torch.testing.assert_close(loaded(noisy), out)
+        torch.testing.assert_close(actor.eval()(states[:, :LEGACY_STATE_LEN]), out)
 
 
 def test_output_shapes(endpoints):

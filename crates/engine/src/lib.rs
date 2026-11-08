@@ -15,6 +15,7 @@ pub use action::Action;
 pub use action::Building;
 pub use action::DevCard;
 pub use action::Resource;
+pub use bayesian_estimate::OtherPlayerCardEstimates;
 pub use board::TileType;
 pub use engine::Engine;
 pub use player::Port;

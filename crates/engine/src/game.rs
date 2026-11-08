@@ -237,6 +237,9 @@ impl Game {
             knights_played,
             largest_army: self.game_detail.get_largest_army(),
             road_lengths: self.game_detail.road_lengths,
+            card_estimates: self
+                .other_player_card_estimates
+                .expected_cards(self.current_player_id()),
         }
     }
 

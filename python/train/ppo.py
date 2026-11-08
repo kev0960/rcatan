@@ -8,7 +8,13 @@ from torch.distributions import Categorical
 from tqdm import tqdm
 
 from train.network_ff import FeedForwardNN
-from train.network_graph import NUM_LAYERS, GraphActor, GraphCritic
+from train.network_graph import (
+    LEGACY_STATE_LEN,
+    NUM_LAYERS,
+    STATE_LEN,
+    GraphActor,
+    GraphCritic,
+)
 from train.network_transformer import TransformerActor
 
 SEED = 42
@@ -60,7 +66,10 @@ DEFAULT_ADVANTAGE = "gae"
 # training can resume; see `PPO.save_training_state`.
 TRAINING_STATE = "train_latest.pt"
 
-ACTOR_INPUT_SIZE = 2016
+ACTOR_INPUT_SIZE = STATE_LEN
+# State sizes `load_actor` accepts: the current one, and the one before the
+# card estimates were appended (actors trained on it read only its floats).
+LOADABLE_STATE_LENS = (STATE_LEN, LEGACY_STATE_LEN)
 ACTOR_OUTPUT_SIZE = 300
 
 # Network architectures for actor and critic: "graph" or "ff" (feed-forward).
@@ -74,7 +83,9 @@ DEFAULT_NETWORK = "graph"
 #   pooled head. Every graph run up to 2026-11-06 (230211, 115058, ...).
 # - "transformer" (TransformerActor: learned action tokens attend over the
 #   board).
-ACTOR_HEADS = ("entity-robber", "entity", "transformer")
+# - "transformer-wired" (TransformerActor with tile_nodes): the same, but each
+#   action token starts from the board tokens it acts on. Added 2026-11-07.
+ACTOR_HEADS = ("entity-robber", "entity", "transformer", "transformer-wired")
 DEFAULT_ACTOR_HEAD = "entity-robber"
 # The head of a checkpoint that doesn't record one: they all predate the
 # actor_head setting, so they are "entity". Feed-forward runs record it too,
@@ -98,24 +109,27 @@ def build_actor(
     network: str,
     num_layers: int = NUM_LAYERS,
     actor_head: str = DEFAULT_ACTOR_HEAD,
+    state_len: int = ACTOR_INPUT_SIZE,
 ) -> nn.Module:
-    """Build the actor; layer count and the actor head apply only to graph."""
+    """Build the actor; layer count and the actor head apply only to graph.
+    `state_len` is the state the actor was trained on (see
+    LOADABLE_STATE_LENS); it always runs on the current state."""
     if network == "graph":
         if actor_head not in ACTOR_HEADS:
             raise ValueError(
                 f"unknown actor head: {actor_head!r} (expected {ACTOR_HEADS})"
             )
         road_endpoints = torch.from_numpy(Engine.road_endpoints())
-        if actor_head == "transformer":
-            return TransformerActor(road_endpoints, num_layers)
         tile_nodes = (
             torch.from_numpy(Engine.tile_nodes())
-            if actor_head == "entity-robber"
+            if actor_head in ("entity-robber", "transformer-wired")
             else None
         )
-        return GraphActor(road_endpoints, num_layers, tile_nodes)
+        if actor_head.startswith("transformer"):
+            return TransformerActor(road_endpoints, num_layers, state_len, tile_nodes)
+        return GraphActor(road_endpoints, num_layers, tile_nodes, state_len)
     if network == "ff":
-        return FeedForwardNN(input_size=ACTOR_INPUT_SIZE, output_size=ACTOR_OUTPUT_SIZE)
+        return FeedForwardNN(input_size=state_len, output_size=ACTOR_OUTPUT_SIZE)
     raise ValueError(f"unknown network: {network!r} (expected 'graph' or 'ff')")
 
 
@@ -131,8 +145,9 @@ def load_actor(path: str | Path, device: str | torch.device = DEVICE) -> nn.Modu
     """Load a trained actor from `path` for inference (sets eval mode).
 
     Checkpoints record their network and state size. Older checkpoints are a
-    bare feed-forward state dict. Raises ValueError if the checkpoint was
-    trained on a different state size than the engine now produces."""
+    bare feed-forward state dict. Actors trained on the legacy 2016-float
+    state (before the card estimates) load too and ignore the estimates.
+    Raises ValueError for any other state size."""
     checkpoint = torch.load(path, map_location=device, weights_only=True)
     if "state_dict" in checkpoint:
         network = checkpoint["network"]
@@ -143,7 +158,7 @@ def load_actor(path: str | Path, device: str | torch.device = DEVICE) -> nn.Modu
         network, state_dict, num_layers = "ff", checkpoint, NUM_LAYERS
         state_len = state_dict["fc1.weight"].shape[1]
 
-    if state_len != ACTOR_INPUT_SIZE:
+    if state_len not in LOADABLE_STATE_LENS:
         raise ValueError(
             f"{path} was trained on a {state_len}-float state, but the engine "
             f"now produces {ACTOR_INPUT_SIZE}; retrain it"
@@ -151,7 +166,10 @@ def load_actor(path: str | Path, device: str | torch.device = DEVICE) -> nn.Modu
 
     _reject_global_fusion(checkpoint, path)
     actor = build_actor(
-        network, num_layers, checkpoint.get("actor_head", LEGACY_ACTOR_HEAD)
+        network,
+        num_layers,
+        checkpoint.get("actor_head", LEGACY_ACTOR_HEAD),
+        state_len,
     )
     actor.load_state_dict(state_dict)
     actor.to(device)
@@ -1014,9 +1032,16 @@ class PPO:
         random agent and `num_matches_checkpoint` per checkpoint opponent.
 
         If `baseline_checkpoint` is given, also plays `num_matches_checkpoint`
-        games against it (one trained seat vs three baseline seats, so parity
-        is a 25% win rate). This compares runs, e.g. graph vs feed-forward;
-        the other numbers only compare a run with itself. NaN if not given.
+        games against it with two trained seats and two baseline seats, so
+        parity is a 50% win rate (a win for either trained seat counts). This
+        compares runs, e.g. graph vs feed-forward; the other numbers only
+        compare a run with itself. NaN if not given.
+
+        Up to 2026-11-07 this was one trained seat vs three baseline seats
+        (`*_vs_baseline` columns, parity 25%). The lone seat there loses a few
+        points to whichever policy holds the other three seats, whatever their
+        strength, so 2 vs 2 measures strength more fairly. The new columns are
+        named `*_vs_baseline_2v2` so the two are never mixed up.
 
         Results are cached by target iter so duplicates aren't re-run:
         percentages that floor to the same checkpoint share a single eval.
@@ -1072,19 +1097,21 @@ class PPO:
             out[f"avg_opp_vp_vs_{label}"] = metrics["avg_opp_vp"]
 
         if baseline_checkpoint is not None:
-            metrics = self._play_eval(
+            metrics = play_matches(
+                self.actor,
+                load_actor(baseline_checkpoint, DEVICE),
                 num_matches_checkpoint,
-                opponent_actor=load_actor(baseline_checkpoint, DEVICE),
-                desc="validate vs baseline",
+                desc="validate 2 vs 2 baseline",
+                num_seats=2,
             )
         else:
             metrics = dict.fromkeys(
                 ("win_rate", "avg_steps", "avg_vp", "avg_opp_vp"), float("nan")
             )
-        out["win_rate_vs_baseline"] = metrics["win_rate"]
-        out["avg_steps_vs_baseline"] = metrics["avg_steps"]
-        out["avg_vp_vs_baseline"] = metrics["avg_vp"]
-        out["avg_opp_vp_vs_baseline"] = metrics["avg_opp_vp"]
+        out["win_rate_vs_baseline_2v2"] = metrics["win_rate"]
+        out["avg_steps_vs_baseline_2v2"] = metrics["avg_steps"]
+        out["avg_vp_vs_baseline_2v2"] = metrics["avg_vp"]
+        out["avg_opp_vp_vs_baseline_2v2"] = metrics["avg_opp_vp"]
 
         return out
 
