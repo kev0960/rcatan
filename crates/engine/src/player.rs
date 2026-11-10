@@ -161,28 +161,21 @@ impl Player {
 
                 // <-- Road --> (Other Settlement) <-- New Road ? -->
                 //                                     ^^^^^^^^^
-                //                                    Cannot build here
-                if road_node_touched.contains(start) {
-                    // If the new road "extension" point is occupied by the other player, then it
-                    // cannot be extended from there
-                    if let Some((_, p)) = board.structure(*start).get()
-                        && p != self.id
-                    {
-                        return false;
-                    }
-                }
+                //                     Cannot connect through this node
+                //
+                // A node is a valid connection point if it touches one of
+                // the player's roads and has no opponent structure on it.
+                // The new road is legal if *either* end is a valid
+                // connection point.
+                let connects = |n: &NodeId| {
+                    road_node_touched.contains(n)
+                        && !matches!(
+                            board.structure(*n).get(),
+                            Some((_, p)) if p != self.id
+                        )
+                };
 
-                if road_node_touched.contains(end) {
-                    // If the new road "extension" point is occupied by the other player, then it
-                    // cannot be extended from there
-                    if let Some((_, p)) = board.structure(*end).get()
-                        && p != self.id
-                    {
-                        return false;
-                    }
-                }
-
-                true
+                connects(start) || connects(end)
             })
             .copied()
             .collect::<VecSet<_>>()
@@ -601,6 +594,32 @@ mod tests {
         roads.sort();
 
         assert_eq!(roads, [RoadId::new(20), RoadId::new(29), RoadId::new(36)]);
+    }
+
+    // Road 1 [0,4] sits between P0's road 0 [0,3] and road 7 [4,8]. Node 0
+    // holds P1's settlement, so P0 can't connect through it, but node 4 is
+    // free, so road 1 is still legal via node 4.
+    #[test]
+    fn get_available_roads_connects_through_free_end_when_other_end_blocked() {
+        let mut board = Board::new(&[]);
+        board.build_road(RoadId::new(0), p0());
+        board.build_road(RoadId::new(7), p0());
+        board.build_structure(NodeId::new(0), p1(), Building::Settlement);
+
+        let p = Player::new(p0());
+        let mut roads = p.get_available_roads(&board);
+        roads.sort();
+
+        assert_eq!(
+            roads,
+            [
+                RoadId::new(1),
+                RoadId::new(2),
+                RoadId::new(6),
+                RoadId::new(12),
+                RoadId::new(13),
+            ]
+        );
     }
 
     // Road 0 connects nodes [0, 3]. Both endpoints are available.
