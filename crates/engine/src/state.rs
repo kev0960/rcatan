@@ -28,6 +28,8 @@ pub struct State {
     pub largest_army: Option<(PlayerId, u8)>,
     // Each player's longest road length.
     pub road_lengths: [u8; 4],
+    // Resource cards left in the bank, indexed like `Resource::ALL`.
+    pub bank: [u8; 5],
     // The current player's estimate of the other players' hands: expected
     // count of each resource, from public information only. Rows in relative
     // order (index 0 = the next player).

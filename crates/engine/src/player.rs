@@ -271,6 +271,7 @@ impl Player {
         &self,
         board: &Board,
         dev_cards: &[u8],
+        bank: &[u8; 5],
     ) -> Vec<Action> {
         let mut actions = vec![Action::EndTurn];
 
@@ -339,18 +340,25 @@ impl Player {
                     continue;
                 }
 
+                // Year of Plenty needs something in the bank to take.
+                if dev_card == DevCard::YearOfPlenty
+                    && bank.iter().all(|c| *c == 0)
+                {
+                    continue;
+                }
+
                 actions.push(Action::UseDevCard(dev_card));
             }
         }
 
         for i in 0..5 {
             if self.cards[i] >= 4 {
-                let resource = Resource::ALL[i];
-                actions.extend(
-                    Resource::ALL
-                        .iter()
-                        .map(|r| Action::MaritimeTrade((resource, 4), *r)),
-                )
+                generate_maritime_trade_actions(
+                    &mut actions,
+                    Resource::ALL[i],
+                    4,
+                    bank,
+                );
             }
         }
 
@@ -381,6 +389,7 @@ impl Player {
                                 &mut actions,
                                 resource,
                                 3,
+                                bank,
                             );
                         }
                     }
@@ -391,6 +400,7 @@ impl Player {
                             &mut actions,
                             Resource::Brick,
                             2,
+                            bank,
                         );
                     }
                 }
@@ -400,6 +410,7 @@ impl Player {
                             &mut actions,
                             Resource::Lumber,
                             2,
+                            bank,
                         );
                     }
                 }
@@ -409,6 +420,7 @@ impl Player {
                             &mut actions,
                             Resource::Ore,
                             2,
+                            bank,
                         );
                     }
                 }
@@ -418,6 +430,7 @@ impl Player {
                             &mut actions,
                             Resource::Grain,
                             2,
+                            bank,
                         );
                     }
                 }
@@ -427,6 +440,7 @@ impl Player {
                             &mut actions,
                             Resource::Wool,
                             2,
+                            bank,
                         );
                     }
                 }
@@ -450,8 +464,14 @@ fn generate_maritime_trade_actions(
     actions: &mut Vec<Action>,
     source_resource: Resource,
     amount: u8,
+    bank: &[u8; 5],
 ) {
     for r in Resource::ALL {
+        // The bank can only give out what it still has.
+        if bank[r as usize] == 0 {
+            continue;
+        }
+
         actions.push(Action::MaritimeTrade((source_resource, amount), r));
     }
 }
@@ -662,7 +682,7 @@ mod tests {
         let board = Board::new(&[]);
         let p = Player::new(p0());
         assert_eq!(
-            p.get_available_actions(&board, &[0u8; 5]),
+            p.get_available_actions(&board, &[0u8; 5], &[19; 5]),
             [Action::EndTurn]
         );
     }
@@ -676,7 +696,7 @@ mod tests {
         p.add_resource_card(Resource::Brick, 1);
         p.add_resource_card(Resource::Lumber, 1);
 
-        let mut actions = p.get_available_actions(&board, &[0u8; 5]);
+        let mut actions = p.get_available_actions(&board, &[0u8; 5], &[19; 5]);
         actions.sort();
         assert_eq!(
             actions,
@@ -697,7 +717,7 @@ mod tests {
         p.add_resource_card(Resource::Brick, 1);
 
         assert_eq!(
-            p.get_available_actions(&board, &[0u8; 5]),
+            p.get_available_actions(&board, &[0u8; 5], &[19; 5]),
             [Action::EndTurn]
         );
     }
@@ -713,7 +733,7 @@ mod tests {
         p.add_resource_card(Resource::Grain, 1);
         p.add_resource_card(Resource::Wool, 1);
 
-        let mut actions = p.get_available_actions(&board, &[0u8; 5]);
+        let mut actions = p.get_available_actions(&board, &[0u8; 5], &[19; 5]);
         actions.sort();
         assert_eq!(
             actions,
@@ -738,7 +758,7 @@ mod tests {
         p.add_resource_card(Resource::Ore, 3);
         p.add_resource_card(Resource::Grain, 2);
 
-        let mut actions = p.get_available_actions(&board, &[0u8; 5]);
+        let mut actions = p.get_available_actions(&board, &[0u8; 5], &[19; 5]);
         actions.sort();
         assert_eq!(
             actions,
@@ -757,7 +777,7 @@ mod tests {
         p.add_resource_card(Resource::Grain, 2);
 
         assert_eq!(
-            p.get_available_actions(&board, &[0u8; 5]),
+            p.get_available_actions(&board, &[0u8; 5], &[19; 5]),
             [Action::EndTurn]
         );
     }
@@ -768,7 +788,7 @@ mod tests {
         let mut p = Player::new(p0());
         p.add_resource_card(Resource::Brick, 4);
 
-        let mut actions = p.get_available_actions(&board, &[0u8; 5]);
+        let mut actions = p.get_available_actions(&board, &[0u8; 5], &[19; 5]);
         actions.sort();
         assert_eq!(
             actions,
@@ -784,13 +804,48 @@ mod tests {
     }
 
     #[test]
+    fn get_available_actions_maritime_trade_skips_resources_bank_is_out_of() {
+        let board = Board::new(&[]);
+        let mut p = Player::new(p0());
+        p.add_resource_card(Resource::Brick, 4);
+
+        let mut actions =
+            p.get_available_actions(&board, &[0u8; 5], &[19, 0, 19, 0, 19]);
+        actions.sort();
+        assert_eq!(
+            actions,
+            [
+                Action::MaritimeTrade((Resource::Brick, 4), Resource::Brick),
+                Action::MaritimeTrade((Resource::Brick, 4), Resource::Ore),
+                Action::MaritimeTrade((Resource::Brick, 4), Resource::Wool),
+                Action::EndTurn,
+            ]
+        );
+    }
+
+    #[test]
+    fn get_available_actions_year_of_plenty_needs_cards_in_bank() {
+        let board = Board::new(&[]);
+        let mut p = Player::new(p0());
+        p.cards[DevCard::YearOfPlenty as usize] = 1;
+
+        let playable = Action::UseDevCard(DevCard::YearOfPlenty);
+        assert!(p
+            .get_available_actions(&board, &[0u8; 5], &[0, 0, 1, 0, 0])
+            .contains(&playable));
+        assert!(!p
+            .get_available_actions(&board, &[0u8; 5], &[0; 5])
+            .contains(&playable));
+    }
+
+    #[test]
     fn get_available_actions_no_maritime_trade_with_3() {
         let board = Board::new(&[]);
         let mut p = Player::new(p0());
         p.add_resource_card(Resource::Brick, 3);
 
         assert_eq!(
-            p.get_available_actions(&board, &[0u8; 5]),
+            p.get_available_actions(&board, &[0u8; 5], &[19; 5]),
             [Action::EndTurn]
         );
     }
@@ -804,7 +859,7 @@ mod tests {
         let mut p = Player::new(p0());
         p.cards[DevCard::RoadBuilding as usize] = 1;
 
-        let actions = p.get_available_actions(&board, &[0u8; 5]);
+        let actions = p.get_available_actions(&board, &[0u8; 5], &[19; 5]);
         assert!(actions.contains(&Action::UseDevCard(DevCard::RoadBuilding)));
     }
 
@@ -815,7 +870,7 @@ mod tests {
         let mut p = Player::new(p0());
         p.cards[DevCard::RoadBuilding as usize] = 1;
 
-        let actions = p.get_available_actions(&board, &[0u8; 5]);
+        let actions = p.get_available_actions(&board, &[0u8; 5], &[19; 5]);
         assert!(!actions.contains(&Action::UseDevCard(DevCard::RoadBuilding)));
     }
 
@@ -951,7 +1006,7 @@ mod tests {
             let mut p = Player::new(p0());
             p.add_resource_card(resource, 2);
 
-            let mut actions = p.get_available_actions(&board, &[0u8; 5]);
+            let mut actions = p.get_available_actions(&board, &[0u8; 5], &[19; 5]);
             actions.sort();
             assert_eq!(
                 actions,
@@ -980,7 +1035,7 @@ mod tests {
         p.add_resource_card(Resource::Brick, 1);
 
         assert_eq!(
-            p.get_available_actions(&board, &[0u8; 5]),
+            p.get_available_actions(&board, &[0u8; 5], &[19; 5]),
             [Action::EndTurn]
         );
     }
@@ -996,7 +1051,7 @@ mod tests {
             p.add_resource_card(r, 3);
         }
 
-        let mut actions = p.get_available_actions(&board, &[0u8; 5]);
+        let mut actions = p.get_available_actions(&board, &[0u8; 5], &[19; 5]);
         actions.sort();
         let mut expected: Vec<Action> = Vec::new();
         for src in Resource::ALL {
@@ -1017,7 +1072,7 @@ mod tests {
         p.add_resource_card(Resource::Brick, 2);
 
         assert_eq!(
-            p.get_available_actions(&board, &[0u8; 5]),
+            p.get_available_actions(&board, &[0u8; 5], &[19; 5]),
             [Action::EndTurn]
         );
     }
@@ -1032,7 +1087,7 @@ mod tests {
         p.add_resource_card(Resource::Brick, 2);
 
         assert_eq!(
-            p.get_available_actions(&board, &[0u8; 5]),
+            p.get_available_actions(&board, &[0u8; 5], &[19; 5]),
             [Action::EndTurn]
         );
     }
@@ -1046,7 +1101,7 @@ mod tests {
         let mut p = Player::new(p0());
         p.add_resource_card(Resource::Brick, 2);
 
-        let mut actions = p.get_available_actions(&board, &[0u8; 5]);
+        let mut actions = p.get_available_actions(&board, &[0u8; 5], &[19; 5]);
         actions.sort();
         assert_eq!(
             actions,
@@ -1071,7 +1126,7 @@ mod tests {
         let mut p = Player::new(p0());
         p.add_resource_card(Resource::Brick, 2);
 
-        let mut actions = p.get_available_actions(&board, &[0u8; 5]);
+        let mut actions = p.get_available_actions(&board, &[0u8; 5], &[19; 5]);
         actions.sort();
         assert_eq!(
             actions,

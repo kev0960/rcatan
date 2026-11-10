@@ -24,6 +24,10 @@ use crate::util::sample::choose_weighted;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 
+mod resources;
+
+use resources::CARDS_PER_RESOURCE;
+
 static WINNING_VP: u8 = 10;
 
 struct GameDetail {
@@ -132,6 +136,10 @@ pub struct Game {
     board: Board,
     dev_cards: ArrayVec<u8, 5>,
 
+    // Resource cards left in the bank, indexed like `Resource::ALL`. Only
+    // changed through the functions in `resources.rs`.
+    bank: [u8; 5],
+
     current_player: usize,
     players: ArrayVec<Player, 4>,
     other_player_card_estimates: OtherPlayerCardEstimates,
@@ -155,6 +163,7 @@ impl Game {
             other_player_card_estimates: OtherPlayerCardEstimates::default(),
             current_player: 0,
             dev_cards: ArrayVec::from([14, 5, 2, 2, 2]),
+            bank: [CARDS_PER_RESOURCE; 5],
             game_detail: GameDetail::new(),
             state: GameState::InitialBoardSetup(0),
             last_dice_roll: None,
@@ -237,6 +246,7 @@ impl Game {
             knights_played,
             largest_army: self.game_detail.get_largest_army(),
             road_lengths: self.game_detail.road_lengths,
+            bank: self.bank,
             card_estimates: self
                 .other_player_card_estimates
                 .expected_cards(self.current_player_id()),
@@ -370,6 +380,7 @@ impl Game {
                     self.current_player_ref().get_available_actions(
                         &self.board,
                         self.dev_cards.as_slice(),
+                        &self.bank,
                     )
                 }
                 DevCard::RoadBuilding => self
@@ -378,8 +389,10 @@ impl Game {
                     .into_iter()
                     .map(Action::BuildRoad)
                     .collect(),
+                // Only resources the bank still has can be taken.
                 DevCard::YearOfPlenty => Resource::ALL
                     .iter()
+                    .filter(|r| self.bank[**r as usize] > 0)
                     .map(|r| Action::YearOfPlentyGetResource(*r))
                     .collect(),
                 DevCard::Monopoly => Resource::ALL
@@ -392,6 +405,7 @@ impl Game {
                 current_player.get_available_actions(
                     &self.board,
                     self.dev_cards.as_slice(),
+                    &self.bank,
                 )
             }
             GameState::GameEnded(_) => {
@@ -403,6 +417,9 @@ impl Game {
     }
 
     pub fn run_action(&mut self, action: Action) -> Reward {
+        #[cfg(debug_assertions)]
+        let cards_before = self.total_resource_cards();
+
         let mut should_recompute_vp = false;
 
         match action {
@@ -478,19 +495,10 @@ impl Game {
                                     .board
                                     .get_resources_near_node_id(node_id);
 
-                                let current_player = self.current_player_mut();
-                                init_resources.iter().for_each(|r| {
-                                    current_player.add_resource_card(*r, 1);
-                                });
-
-                                init_resources.into_iter().for_each(|r| {
-                                    self.other_player_card_estimates
-                                        .observe_gain_resource(
-                                            self.current_player_id(),
-                                            r,
-                                            1,
-                                        );
-                                });
+                                let player = self.current_player_id();
+                                for r in init_resources {
+                                    self.gain_from_bank(player, r, 1);
+                                }
                             }
 
                             // Settlements are placed on even initial-setup
@@ -530,13 +538,9 @@ impl Game {
                 should_recompute_vp = true;
             }
             Action::MaritimeTrade(lose, get) => {
-                self.spend_resources(&[(lose.0, lose.1)]);
-                self.current_player_mut().add_resource_card(get, 1);
-                self.other_player_card_estimates.observe_gain_resource(
-                    self.current_player_id(),
-                    get,
-                    1,
-                );
+                let player = self.current_player_id();
+                self.pay_to_bank(player, lose.0, lose.1);
+                self.gain_from_bank(player, get, 1);
             }
             Action::DiscardResource(resource) => {
                 self.spend_resources(&[(resource, 1)]);
@@ -573,14 +577,10 @@ impl Game {
                 if player.num_resource_cards() > 0 {
                     let r = choose_weighted(&player.cards[0..5], &mut self.rng);
 
-                    // Target player loses the card; current player gains it.
-                    let resource = Resource::ALL[r];
-                    player.use_resource_card(resource, 1);
-                    self.current_player_mut().add_resource_card(resource, 1);
-                    self.other_player_card_estimates.observe_steal(
+                    self.steal(
                         self.current_player_id(),
                         PlayerId::from(target_player),
-                        resource,
+                        Resource::ALL[r],
                     );
                 }
                 self.state = GameState::ContinueAction;
@@ -662,20 +662,17 @@ impl Game {
                 }
             }
             Action::YearOfPlentyGetResource(resource) => {
-                let current_player = self.current_player_mut();
-                current_player.add_resource_card(resource, 1);
-                self.other_player_card_estimates.observe_gain_resource(
-                    self.current_player_id(),
-                    resource,
-                    1,
-                );
+                self.gain_from_bank(self.current_player_id(), resource, 1);
 
                 if let GameState::UsedDevCard((
                     DevCard::YearOfPlenty,
                     processed_once,
                 )) = self.state
                 {
-                    if processed_once {
+                    // The second card is skipped if the bank has nothing
+                    // left to give.
+                    let bank_is_empty = self.bank.iter().all(|c| *c == 0);
+                    if processed_once || bank_is_empty {
                         self.state = GameState::ContinueAction;
                     } else {
                         self.state = GameState::UsedDevCard((
@@ -690,35 +687,18 @@ impl Game {
                 }
             }
             Action::MonopolyGetResource(resource) => {
-                let current_player_id = self.current_player_id();
-
-                let mut total_cards = 0;
-                for player in &mut self.players {
-                    if player.id == current_player_id {
-                        continue;
-                    }
-
-                    let num_cards = player.cards[resource as usize];
-                    total_cards += num_cards;
-                    player.use_resource_card(resource, num_cards);
-                }
-
-                self.current_player_mut()
-                    .add_resource_card(resource, total_cards);
-
-                self.other_player_card_estimates.observe_monopoly(
-                    current_player_id,
-                    resource,
-                    &self
-                        .players
-                        .iter()
-                        .map(|p| p.num_resource_cards())
-                        .collect::<Vec<_>>(),
-                );
+                self.monopolize(self.current_player_id(), resource);
 
                 self.state = GameState::ContinueAction;
             }
         }
+
+        #[cfg(debug_assertions)]
+        assert_eq!(
+            cards_before,
+            self.total_resource_cards(),
+            "{action:?} created or destroyed resource cards"
+        );
 
         self.compute_rewards(should_recompute_vp)
     }
@@ -818,12 +798,31 @@ impl Game {
     fn handle_non_7_dice_roll(&mut self, dice: u8) {
         assert!(dice != 7);
 
-        let resources = self.board.get_matching_resources(dice);
+        // owed[resource][player]
+        let mut owed = [[0u8; 4]; 5];
+        for (player, resource, num) in self.board.get_matching_resources(dice)
+        {
+            owed[resource as usize][usize::from(player)] += num;
+        }
 
-        for (player, resource, num) in resources {
-            self.players[usize::from(player)].add_resource_card(resource, num);
-            self.other_player_card_estimates
-                .observe_gain_resource(player, resource, num);
+        for resource in Resource::ALL {
+            let r = resource as usize;
+            let total: u8 = owed[r].iter().sum();
+            let num_receivers = owed[r].iter().filter(|c| **c > 0).count();
+
+            // When the bank can't pay everyone, nobody gets this resource,
+            // unless a single player is owed it, who then takes what's left.
+            let short = total > self.bank[r];
+            if short && num_receivers > 1 {
+                continue;
+            }
+
+            for p in 0..4 {
+                let count = owed[r][p].min(self.bank[r]);
+                if count > 0 {
+                    self.gain_from_bank(PlayerId::from(p), resource, count);
+                }
+            }
         }
     }
 
@@ -955,18 +954,6 @@ impl Game {
         }
     }
 
-    // Remove `cost` from the current player's hand and let every other
-    // player's card estimate know which cards were spent (spending is public).
-    fn spend_resources(&mut self, cost: &[(Resource, u8)]) {
-        let player_id = self.current_player_id();
-        for &(resource, count) in cost {
-            self.players[usize::from(player_id)]
-                .use_resource_card(resource, count);
-            self.other_player_card_estimates
-                .observe_discard_resource(player_id, resource, count);
-        }
-    }
-
     fn current_player_mut(&mut self) -> &mut Player {
         let player_id = usize::from(self.current_player_id());
         &mut self.players[player_id]
@@ -999,6 +986,7 @@ mod tests {
             other_player_card_estimates: OtherPlayerCardEstimates::default(),
             current_player: 0,
             dev_cards: ArrayVec::from([0; 5]),
+            bank: [CARDS_PER_RESOURCE; 5],
             game_detail: GameDetail::new(),
             state: GameState::ContinueAction,
             last_dice_roll: None,
@@ -1411,6 +1399,142 @@ mod tests {
         assert_eq!(game.state().road_lengths, [0, 3, 0, 0]);
     }
 
+    // ---- Bank tests ----
+
+    // Tile 0 (Mountains) and tile 1 (Forest) both produce on a 5.
+    //   Tile 0 nodes: [0, 3, 4, 7, 8, 12]
+    //   Tile 1 nodes: [1, 4, 5, 8, 9, 13]
+    fn game_with_ore_and_lumber_on_5(ore_in_bank: u8) -> Game {
+        let mut game = game_with_empty_board();
+        game.board =
+            Board::new(&[(5, TileType::Mountains), (5, TileType::Forest)]);
+        game.bank[Resource::Ore as usize] = ore_in_bank;
+        game
+    }
+
+    #[test]
+    fn production_is_skipped_when_bank_is_short_for_multiple_players() {
+        let mut game = game_with_ore_and_lumber_on_5(5);
+        // Player 0 is owed 4 ore, player 1 is owed 2 ore: 6 > 5.
+        game.board.build_structure(NodeId::new(0), p(0), Building::City);
+        game.board.build_structure(NodeId::new(7), p(0), Building::City);
+        game.board.build_structure(NodeId::new(12), p(1), Building::City);
+        // Player 2 is owed 1 lumber, which the bank can pay.
+        game.board
+            .build_structure(NodeId::new(1), p(2), Building::Settlement);
+
+        game.handle_non_7_dice_roll(5);
+
+        assert_eq!(game.players[0].cards[Resource::Ore as usize], 0);
+        assert_eq!(game.players[1].cards[Resource::Ore as usize], 0);
+        assert_eq!(game.bank[Resource::Ore as usize], 5);
+
+        // The shortage only affects ore.
+        assert_eq!(game.players[2].cards[Resource::Lumber as usize], 1);
+        assert_eq!(game.bank[Resource::Lumber as usize], 18);
+    }
+
+    #[test]
+    fn single_receiver_takes_what_is_left_when_bank_is_short() {
+        let mut game = game_with_ore_and_lumber_on_5(5);
+        // Player 0 is the only one owed ore: 6 > 5.
+        game.board.build_structure(NodeId::new(0), p(0), Building::City);
+        game.board.build_structure(NodeId::new(7), p(0), Building::City);
+        game.board.build_structure(NodeId::new(12), p(0), Building::City);
+
+        game.handle_non_7_dice_roll(5);
+
+        assert_eq!(game.players[0].cards[Resource::Ore as usize], 5);
+        assert_eq!(game.bank[Resource::Ore as usize], 0);
+    }
+
+    #[test]
+    fn production_is_paid_in_full_when_bank_has_exactly_enough() {
+        let mut game = game_with_ore_and_lumber_on_5(6);
+        game.board.build_structure(NodeId::new(0), p(0), Building::City);
+        game.board.build_structure(NodeId::new(7), p(0), Building::City);
+        game.board.build_structure(NodeId::new(12), p(1), Building::City);
+
+        game.handle_non_7_dice_roll(5);
+
+        assert_eq!(game.players[0].cards[Resource::Ore as usize], 4);
+        assert_eq!(game.players[1].cards[Resource::Ore as usize], 2);
+        assert_eq!(game.bank[Resource::Ore as usize], 0);
+    }
+
+    #[test]
+    fn spent_and_traded_cards_go_through_the_bank() {
+        let mut game = game_in_continue_action();
+        game.bank[Resource::Brick as usize] = 15;
+        game.players[0].cards[Resource::Brick as usize] = 4;
+
+        game.run_action(Action::MaritimeTrade(
+            (Resource::Brick, 4),
+            Resource::Ore,
+        ));
+
+        assert_eq!(game.bank[Resource::Brick as usize], 19);
+        assert_eq!(game.bank[Resource::Ore as usize], 18);
+        assert_eq!(game.players[0].cards[Resource::Ore as usize], 1);
+    }
+
+    #[test]
+    fn year_of_plenty_only_offers_resources_left_in_the_bank() {
+        let mut game = game_in_continue_action();
+        game.state = GameState::UsedDevCard((DevCard::YearOfPlenty, false));
+        game.bank = [0, 0, 1, 2, 0];
+
+        assert_eq!(
+            game.get_actions(),
+            [
+                Action::YearOfPlentyGetResource(Resource::Ore),
+                Action::YearOfPlentyGetResource(Resource::Grain),
+            ]
+        );
+
+        // Taking the last ore leaves only grain for the second card.
+        game.run_action(Action::YearOfPlentyGetResource(Resource::Ore));
+        assert_eq!(
+            game.get_actions(),
+            [Action::YearOfPlentyGetResource(Resource::Grain)]
+        );
+    }
+
+    #[test]
+    fn year_of_plenty_ends_early_when_bank_runs_out() {
+        let mut game = game_in_continue_action();
+        game.state = GameState::UsedDevCard((DevCard::YearOfPlenty, false));
+        game.bank = [0, 0, 1, 0, 0];
+
+        game.run_action(Action::YearOfPlentyGetResource(Resource::Ore));
+
+        assert!(matches!(game.state, GameState::ContinueAction));
+    }
+
+    #[test]
+    fn bank_and_hands_always_add_up_to_19_per_resource() {
+        for seed in 0..8 {
+            let mut game = Game::new(seed);
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+            for _ in 0..3000 {
+                let actions = game.get_actions();
+                let action = actions[rng.random_range(0..actions.len())];
+                game.run_action(action);
+
+                assert_eq!(
+                    game.total_resource_cards(),
+                    [CARDS_PER_RESOURCE; 5],
+                    "after {action:?}"
+                );
+
+                if game.is_game_ended().is_some() {
+                    break;
+                }
+            }
+        }
+    }
+
     // ---- handle_non_7_dice_roll tests ----
 
     #[test]
@@ -1424,6 +1548,7 @@ mod tests {
             other_player_card_estimates: OtherPlayerCardEstimates::default(),
             current_player: 0,
             dev_cards: ArrayVec::from([0; 5]),
+            bank: [CARDS_PER_RESOURCE; 5],
             game_detail: GameDetail::new(),
             state: GameState::ContinueAction,
             last_dice_roll: None,
@@ -1448,6 +1573,7 @@ mod tests {
             other_player_card_estimates: OtherPlayerCardEstimates::default(),
             current_player: 0,
             dev_cards: ArrayVec::from([0; 5]),
+            bank: [CARDS_PER_RESOURCE; 5],
             game_detail: GameDetail::new(),
             state: GameState::ContinueAction,
             last_dice_roll: None,
@@ -1495,6 +1621,7 @@ mod tests {
             // 1 has the most cards over their target, so they discard first.
             current_player: 1,
             dev_cards: ArrayVec::from([0; 5]),
+            bank: [CARDS_PER_RESOURCE; 5],
             game_detail: GameDetail::new(),
             state: GameState::Dice7Rolled((p(0), [0, 4, 5, 0])), // Player 0 rolled a 7
             last_dice_roll: Some(7),
@@ -1654,6 +1781,7 @@ mod tests {
             other_player_card_estimates: OtherPlayerCardEstimates::default(),
             current_player: 0,
             dev_cards: ArrayVec::from([0; 5]),
+            bank: [CARDS_PER_RESOURCE; 5],
             game_detail: GameDetail::new(),
             state: GameState::ContinueAction,
             last_dice_roll: None,
@@ -1678,6 +1806,7 @@ mod tests {
             other_player_card_estimates: OtherPlayerCardEstimates::default(),
             current_player: 0,
             dev_cards: ArrayVec::from([0; 5]),
+            bank: [CARDS_PER_RESOURCE; 5],
             game_detail: GameDetail::new(),
             state: GameState::ContinueAction,
             last_dice_roll: None,
@@ -2061,6 +2190,7 @@ mod tests {
             other_player_card_estimates: OtherPlayerCardEstimates::default(),
             current_player: 0,
             dev_cards: ArrayVec::from([0; 5]),
+            bank: [CARDS_PER_RESOURCE; 5],
             game_detail: GameDetail::new(),
             // 7 was rolled but nobody is over the cap → AwaitingMoveRobber.
             state: GameState::AwaitingMoveRobber,
