@@ -27,6 +27,7 @@ from train.ppo import (
     PPO,
     TRAINING_STATE,
     find_resume_checkpoint,
+    vp_reward_scale,
 )
 
 BATCH_SIZE = 64
@@ -174,6 +175,14 @@ def parse_args() -> argparse.Namespace:
         "run's)",
     )
     parser.add_argument(
+        "--vp-reward-fade",
+        metavar="START:END",
+        help="fade out the +0.1 per VP reward over training: full until "
+        "iteration START, falling linearly to none at END, then only the "
+        "+1 / -1 for winning or losing (e.g. 150:450). 'off' keeps it all "
+        "run long (default: off, or the resumed run's)",
+    )
+    parser.add_argument(
         "--iterations",
         type=int,
         help="iterations to train in this invocation, on top of any resumed "
@@ -214,6 +223,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--actor-lr-min must be positive")
     if args.iterations is not None and args.iterations < 1:
         parser.error("--iterations must be at least 1")
+    if args.vp_reward_fade is not None:
+        args.vp_reward_fade = parse_fade(parser, args.vp_reward_fade)
     if args.batch_size < 1:
         parser.error("--batch-size must be at least 1")
     # Resolved here, not as argparse defaults, so tests can patch
@@ -235,6 +246,19 @@ def parse_args() -> argparse.Namespace:
     ):
         parser.error("--critic-passes must be between 1 and --actor-passes")
     return args
+
+
+def parse_fade(parser: argparse.ArgumentParser, value: str) -> list[int] | str:
+    """`START:END` as [start, end], or "off"."""
+    if value == "off":
+        return value
+    try:
+        start, end = (int(v) for v in value.split(":"))
+    except ValueError:
+        parser.error(f"--vp-reward-fade must be START:END or off, got {value!r}")
+    if not 0 <= start < end:
+        parser.error(f"--vp-reward-fade needs 0 <= START < END, got {value!r}")
+    return [start, end]
 
 
 def git_revision() -> dict:
@@ -259,8 +283,9 @@ def read_config(checkpoint_dir: Path) -> dict | None:
 def resolve_lr_settings(
     args: argparse.Namespace, previous: dict | None, start_iter: int
 ) -> None:
-    """Fill in the learning-rate flags and --iterations that weren't given:
-    from the resumed run's config.json, else the defaults."""
+    """Fill in the learning-rate flags, --vp-reward-fade and --iterations
+    that weren't given: from the resumed run's config.json, else the
+    defaults."""
     prev = previous or {}
     if args.lr_decay is None:
         args.lr_decay = prev.get("lr_decay", "constant")
@@ -274,6 +299,11 @@ def resolve_lr_settings(
             if previous
             else CRITIC_LR_SCALE
         )
+    if args.vp_reward_fade is None:
+        # Runs from before --vp-reward-fade kept the VP reward throughout.
+        args.vp_reward_fade = prev.get("vp_reward_fade")
+    elif args.vp_reward_fade == "off":
+        args.vp_reward_fade = None
     if args.iterations is None:
         if not start_iter:
             args.iterations = NUM_ITERATIONS
@@ -464,6 +494,9 @@ def main():
         # iterations it decays over (lr_decay_from to lr_decay_to).
         **schedule,
         "critic_lr_scale": args.critic_lr_scale,
+        # [start, end] of the VP reward fade-out (0-based iterations), or
+        # null: the full +0.1 per VP the whole run.
+        "vp_reward_fade": args.vp_reward_fade,
         "compile": args.compile,
         "baseline_checkpoint": BASELINE_CHECKPOINT,
         "git": git_revision(),
@@ -495,6 +528,8 @@ def main():
             "actor_grad_clipped",
             "critic_grad_norm",
             "critic_grad_norm_max",
+            # Share of the +0.1 per VP reward this iteration collected with.
+            "vp_reward_scale",
         ],
     )
     val_file, val_writer = _open_csv(
@@ -534,6 +569,10 @@ def main():
             + f", lr: actor {ppo.actor_lr:g} / critic {ppo.critic_lr:g} ({args.lr_decay})"
             + f", games: {args.batch_size} x {NUM_STEPS} steps"
             + f", passes: actor {ppo.actor_passes} / critic {ppo.critic_passes}"
+            + (
+                ", vp reward fade: {}-{}".format(*args.vp_reward_fade)
+                if args.vp_reward_fade else ""
+            )
             + f", baseline: {BASELINE_CHECKPOINT}"
         )
         completed = start_iter
@@ -545,6 +584,7 @@ def main():
         )
         for i in pbar:
             ppo.set_actor_lr(scheduled_actor_lr(schedule, i, args.actor_lr_min))
+            ppo.vp_reward_scale = vp_reward_scale(args.vp_reward_fade, i)
             ppo.observe(NUM_STEPS)
             metrics = ppo.train(
                 mini_batch_size=args.mini_batch_size,
@@ -560,6 +600,7 @@ def main():
                 actor_lr=f"{ppo.actor_lr:.2g}",
                 kl=f"{metrics['approx_kl']:.4f}",
                 gnorm=f"{metrics['actor_grad_norm']:.2f}",
+                vp=f"{ppo.vp_reward_scale:.2f}",
             )
 
             train_writer.writerow(
@@ -584,6 +625,7 @@ def main():
                     f"{metrics['actor_grad_clipped']:.6f}",
                     f"{metrics['critic_grad_norm']:.6f}",
                     f"{metrics['critic_grad_norm_max']:.6f}",
+                    f"{ppo.vp_reward_scale:.4f}",
                 ]
             )
             train_file.flush()

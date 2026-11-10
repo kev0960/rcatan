@@ -1,3 +1,4 @@
+import pytest
 import numpy as np
 
 from train.ppo import PPO
@@ -206,3 +207,31 @@ def test_compute_rewards_handles_batch_independence():
         ]
     )
     np.testing.assert_allclose(discounted_result, expected, atol=1e-6)
+
+
+def test_vp_reward_scale_fades_linearly_between_start_and_end():
+    from train.ppo import vp_reward_scale
+
+    assert vp_reward_scale(None, 500) == 1.0
+    fade = (150, 450)
+    assert vp_reward_scale(fade, 0) == 1.0
+    assert vp_reward_scale(fade, 149) == 1.0
+    assert vp_reward_scale(fade, 150) == 1.0
+    assert vp_reward_scale(fade, 300) == 0.5
+    assert vp_reward_scale(fade, 449) == pytest.approx(1 / 300)
+    assert vp_reward_scale(fade, 450) == 0.0
+    assert vp_reward_scale(fade, 599) == 0.0
+
+
+def test_scale_vp_rewards_keeps_the_win_reward():
+    from train.ppo import scale_vp_rewards
+
+    rewards = np.array(
+        [[0.1, 0.0, -0.1, 0.2], [1.0, -1.0, -1.0, -1.0]], dtype=np.float32
+    )
+    ended = np.array([False, True])
+    scaled = scale_vp_rewards(rewards, ended, 0.25)
+    assert scaled.dtype == np.float32
+    np.testing.assert_allclose(scaled[0], [0.025, 0.0, -0.025, 0.05])
+    np.testing.assert_array_equal(scaled[1], rewards[1])
+    assert scale_vp_rewards(rewards, ended, 1.0) is rewards

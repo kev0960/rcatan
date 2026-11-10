@@ -132,6 +132,55 @@ actor head scores roads from their two end nodes, settlements and cities from
 their node, and the other actions from a summary of the board. The actor and
 critic are separate networks.
 
+### 20261108-091805: VP reward fade-out, extended to 900 iterations (current best)
+
+- **Tests:** whether the bot plays better when the +0.1 per VP reward fades
+  out during training, so the late policy is trained only on winning or
+  losing (+1 / -1).
+- **Changes from 155220:**
+  - `--vp-reward-fade 150:450`: the full VP reward until iteration 150, then
+    linearly down to none at iteration 450. From then on only the win reward
+    counts. The scaling is done in Python (`scale_vp_rewards`); the engine
+    and the game rules are unchanged.
+  - Baseline: the fully trained 155220, played 2 vs 2 (parity 50%).
+  - Everything else the same: `entity-robber`, 128 games, 2 actor passes and
+    1 critic pass, linear decay from 1e-4 to 3e-5 over 600 iterations.
+  - Resumed at iteration 600 for 300 more iterations at a fixed 3e-5, still
+    with no VP reward.
+- **Result:**
+  - Identical to 155220 until the fade began (entropy 0.424 vs 0.426,
+    `ev_mc` 0.253 vs 0.256 over iterations 121-150), so the fade is the only
+    difference.
+  - vs baseline (2 vs 2), by 50-iteration block: 42.2% (301-350), 45.0%,
+    45.9%, 44.6% (451-500, no VP reward), 48.9%, 50.9% (551-600). Even with
+    155220 at the same 600 iterations.
+  - It kept rising during the win-only phase (451-600). Over the same
+    iterations 155220 was flat against its own baseline (22.3%, 22.5%,
+    20.6%, 1 vs 3 against 230211).
+  - Iterations 601-900: 50.2% (610-650), 45.6%, 50.1%, 52.6%, 52.4%, 55.5%
+    (860-900). 53.4% ± 1.9% over iterations 751-890. Wins against random
+    bots in 149-155 steps, against about 160 at iteration 600.
+  - The critic held up without the VP reward. `ev_mc` dipped from 0.257 to
+    about 0.233 during the fade, recovered to 0.252 by iteration 600, and
+    stayed at 0.245-0.27 to iteration 900.
+  - Entropy was 0.01-0.02 above 155220 during the fade. It ended at 0.283
+    at iteration 600 and 0.242 at iteration 900.
+  - `return_mean` fell from -0.15 to about -0.32 as the VP reward went away.
+    That's expected: one +1 and three -1s per game, with no VP reward to
+    offset them.
+  - The actor gradient norm crept up from 1.05 to 1.41. The share of steps
+    clipped at 2.0 rose from 1% to about 3% by iteration 900.
+  - 3 h 17 min for 600 iterations, 1 h 37 min for the extra 300.
+- **Open:** the gain over 155220 came only in the extra 300 iterations, and
+  155220 never trained past 600. So this doesn't yet separate the fade
+  from longer training. The control is 155220 resumed for 300 iterations
+  without the fade, then iteration 900 against iteration 900 in
+  `train.compare`.
+- **Verdict:** the strongest bot so far, 55.5% at 2 vs 2 against 155220 at
+  the end. Probably due to the fade: the run kept improving in the
+  win-only phase where 155220 had levelled off. That isn't confirmed until
+  the control run.
+
 ### 20261107-155220: bayesian estimation
 
 Include the bayesian estimation of the other player's card from the current

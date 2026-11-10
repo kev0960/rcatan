@@ -57,6 +57,35 @@ EPSILON = 0.2
 MAX_GRAD_NORM = 2.0
 GAE_LAMBDA = 0.95
 
+
+def vp_reward_scale(fade: tuple[int, int] | None, iteration: int) -> float:
+    """How much of the +0.1 per VP reward the 0-based `iteration` keeps.
+
+    `fade` is (start, end): the full VP reward before `start`, falling
+    linearly to none at `end`, then none. None keeps it all the whole run.
+    """
+    if fade is None:
+        return 1.0
+    start, end = fade
+    if iteration < start:
+        return 1.0
+    if iteration >= end:
+        return 0.0
+    return 1.0 - (iteration - start) / (end - start)
+
+
+def scale_vp_rewards(
+    rewards: np.ndarray, game_ended: np.ndarray, scale: float
+) -> np.ndarray:
+    """Scales the VP-change rewards, (batch, 4), by `scale`. A game's last
+    step keeps its +1 / -1: the engine gives the win reward instead of the VP
+    change on it, and games only end with a winner."""
+    if scale == 1.0:
+        return rewards
+    return np.where(game_ended[:, None], rewards, rewards * scale).astype(
+        rewards.dtype
+    )
+
 # How advantages and critic targets are computed: "gae" (GAE(lambda), see
 # `compute_gae`) or "mc" (Monte Carlo discounted returns).
 ADVANTAGES = ("gae", "mc")
@@ -391,6 +420,9 @@ class PPO:
 
         # The run's config, saved into every checkpoint (see `train.__main__`).
         self.config: dict | None = None
+        # Multiplier on the VP-change rewards collected (see
+        # `vp_reward_scale`); the win / loss reward is never scaled.
+        self.vp_reward_scale = 1.0
 
         self.buf_states = []
         self.buf_players = []
@@ -1135,6 +1167,7 @@ class PPO:
         value = self._critic(state_tensor)
 
         rewards, game_ended_mask, _ = self.engine.step(actions.cpu().numpy())
+        rewards = scale_vp_rewards(rewards, game_ended_mask, self.vp_reward_scale)
 
         return (
             state_tensor,

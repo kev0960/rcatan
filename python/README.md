@@ -167,6 +167,24 @@ uv run python -m train --resume 20261102-230211 --iterations 200 \
   --actor-lr-min 3e-5
 ```
 
+The reward is +0.1 per VP gained (or -0.1 per VP lost), and on the move
+that ends the game +1 for the winner and -1 for everyone else.
+`--vp-reward-fade START:END` fades the VP part out over training: the full
++0.1 until iteration START, falling linearly to nothing at END, after which
+only winning or losing counts. The VP reward helps early, when a random
+policy almost never wins, but late in training it can reward VP that doesn't
+lead to a win. The win reward is never scaled.
+
+```sh
+uv run python -m train --vp-reward-fade 150:450 --iterations 600
+```
+
+`config.json` records `vp_reward_fade`, and the training log's
+`vp_reward_scale` column shows the share each iteration used. A resume keeps
+the run's fade unless you pass `--vp-reward-fade` (`off` turns it off). The
+returns and the critic's values shrink as the VP reward fades, so
+`return_mean` and `value_mean` aren't comparable with runs without it.
+
 Each iteration collects `--batch-size` games in parallel (default 64) for
 3000 steps, then trains the actor for `--actor-passes` passes over that data
 (default 4) and the critic for `--critic-passes` (default 2 for graph, 4 for
