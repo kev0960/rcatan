@@ -844,11 +844,12 @@ impl Game {
 
         let updated_vps = self.game_detail.vp;
 
-        // Check if current player has won the game
-        let current_player = self.current_player_id();
-        if self.game_detail.vp.get_vp(current_player) >= WINNING_VP {
-            self.state = GameState::GameEnded(current_player);
-            return Reward::from_win(current_player);
+        // A player can only win on their own turn, so check the turn owner
+        // rather than whoever is acting (e.g. a discarder after a 7).
+        let turn_owner = self.turn_owner();
+        if self.game_detail.vp.get_vp(turn_owner) >= WINNING_VP {
+            self.state = GameState::GameEnded(turn_owner);
+            return Reward::from_win(turn_owner);
         }
 
         // If no player has won the game, then compute the reward based on the
@@ -929,6 +930,16 @@ impl Game {
         }
     }
 
+    // The player whose turn it is. Usually the same as `current_player_id`,
+    // except during post-7 discards, where `current_player` points at the
+    // active discarder while the turn still belongs to the roller.
+    fn turn_owner(&self) -> PlayerId {
+        match self.state {
+            GameState::Dice7Rolled((roller, _)) => roller,
+            _ => self.current_player_id(),
+        }
+    }
+
     fn current_player_id(&self) -> PlayerId {
         match self.state {
             GameState::InitialBoardSetup(current_order) => {
@@ -993,6 +1004,39 @@ mod tests {
             last_dice_roll: None,
             rng,
         }
+    }
+
+    // ---- Win check during post-7 discards ----
+
+    /// Player 0 rolled a 7; player 1 has 8 cards and must discard down to 4.
+    fn game_in_discard_phase(vps: [u8; 4]) -> Game {
+        let mut game = game_with_empty_board();
+        game.current_player = 1;
+        game.state = GameState::Dice7Rolled((p(0), [0, 4, 0, 0]));
+        game.players[1].add_resource_card(Resource::Brick, 8);
+        game.game_detail.vp = VictoryPoint::new(ArrayVec::from(vps));
+        game
+    }
+
+    #[test]
+    fn discarder_with_winning_vp_does_not_win_on_others_turn() {
+        let mut game = game_in_discard_phase([2, 10, 2, 2]);
+
+        game.run_action(Action::DiscardResource(Resource::Brick));
+
+        assert_eq!(game.is_game_ended(), None);
+        assert!(matches!(game.state, GameState::Dice7Rolled(_)));
+    }
+
+    #[test]
+    fn turn_owner_with_winning_vp_wins_during_discards() {
+        let mut game = game_in_discard_phase([10, 2, 2, 2]);
+
+        let reward = game.run_action(Action::DiscardResource(Resource::Brick));
+
+        assert_eq!(game.is_game_ended(), Some(p(0)));
+        assert_eq!(reward.reward[0], 1.0);
+        assert_eq!(reward.reward[1], -1.0);
     }
 
     // ---- GameDetail tests ----
