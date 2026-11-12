@@ -53,6 +53,18 @@ fn build_node_to_ports_table() -> [Option<Port>; 54] {
     node_to_ports
 }
 
+// The most actions `Player::get_available_actions` can return at once:
+//
+//    1  EndTurn
+//   72  BuildRoad, one per road
+//   54  BuildStructure(Settlement), one per node
+//    5  BuildStructure(City), one per settlement the player can have
+//    1  BuyDevCard
+//    4  UseDevCard, one per playable dev card
+//   75  MaritimeTrade: 5 resources to give x 5 resources to take, for each
+//       of the 4:1, 3:1 and 2:1 rates
+const MAX_AVAILABLE_ACTIONS: usize = 1 + 72 + 54 + 5 + 1 + 4 + 75;
+
 pub struct Player {
     pub id: PlayerId,
 
@@ -273,7 +285,10 @@ impl Player {
         dev_cards: &[u8],
         bank: &[u8; 5],
     ) -> Vec<Action> {
-        let mut actions = vec![Action::EndTurn];
+        // Reserved for the most actions there can be, so that the vector never
+        // has to grow.
+        let mut actions = Vec::with_capacity(MAX_AVAILABLE_ACTIONS);
+        actions.push(Action::EndTurn);
 
         // Check road building.
         if self.cards[Resource::Brick as usize] != 0
@@ -447,6 +462,7 @@ impl Player {
             }
         }
 
+        debug_assert!(actions.len() <= MAX_AVAILABLE_ACTIONS);
         actions
     }
 
