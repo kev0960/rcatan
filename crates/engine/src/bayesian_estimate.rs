@@ -1,5 +1,5 @@
-use ahash::AHashMap;
 use arrayvec::ArrayVec;
+use rustc_hash::FxHashMap;
 use std::array::from_fn;
 
 use crate::PlayerId;
@@ -210,7 +210,7 @@ impl BayesianCardEstimate {
     }
 
     pub fn observe_discard_unknown_single_card(&mut self) {
-        let mut cards = AHashMap::new();
+        let mut cards = FxHashMap::default();
 
         for (card, probability) in &self.cards {
             // A stolen card is drawn uniformly from the hand, so each resource
@@ -241,7 +241,7 @@ impl BayesianCardEstimate {
         resource: Resource,
         remaining_cards: u8,
     ) {
-        let mut cards = AHashMap::new();
+        let mut cards = FxHashMap::default();
 
         for (card, probability) in &self.cards {
             let card = card.remove_all(resource);
@@ -330,7 +330,7 @@ impl BayesianCardEstimate {
             &uniform
         };
 
-        let mut cards = AHashMap::new();
+        let mut cards = FxHashMap::default();
 
         for (card, probability) in &self.cards {
             for resource in Resource::ALL {

@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use ahash::AHashSet;
+use arrayvec::ArrayVec;
 use bitvec::prelude::*;
 
 use crate::NodeId;
@@ -42,9 +42,13 @@ impl LongestRoadTracker {
 
         // Only the modified players are searched; the others keep their
         // previously computed length.
-        let mut checked = AHashSet::<RoadId>::new();
-        for player in players_to_check {
-            let player_index = usize::from(player);
+        let mut checked = RoadSet::new();
+        for (player_index, modified) in players_to_check.into_iter().enumerate()
+        {
+            if !modified {
+                continue;
+            }
+            let player = PlayerId::from(player_index);
 
             // Bits `72 * player .. 72 * (player + 1)` are this player's
             // roads, so the index within the slice is the road id.
@@ -54,7 +58,7 @@ impl LongestRoadTracker {
             let mut longest_road = 0;
             for road_id in player_roads.iter_ones() {
                 let road_id = RoadId::from(road_id);
-                if checked.contains(&road_id) {
+                if checked.contains(road_id) {
                     continue;
                 }
 
@@ -62,7 +66,7 @@ impl LongestRoadTracker {
                     bfs_on_graph(current, player, road_id, &mut checked);
                 longest_road =
                     longest_road.max(find_longest_road_in_connected_set(
-                        current, player, &connected,
+                        current, player, connected,
                     ));
             }
 
@@ -77,69 +81,72 @@ impl LongestRoadTracker {
 fn find_longest_road_in_connected_set(
     board: &CompactBoardState,
     player: PlayerId,
-    connected_roads: &AHashSet<RoadId>,
+    connected_roads: RoadSet,
 ) -> u8 {
     // We can ignore the "pass-through" roads.
     //
     // ... <-- road --> <-- road --> <-- road -->
     //                      ^^^ Pass through.
     //              There is no other road / settelment in its nodes.
-    let mut starting_roads = connected_roads
-        .iter()
-        .filter(|r| {
-            let road_id = *r;
-
-            // One of the road end is occupied by the other settlement.
-            let nodes = (*ROAD_TO_NODES)[usize::from(*road_id)];
-            if nodes.iter().any(|n| {
-                if let Some(owner) = board.get_node_owner(*n)
-                    && owner != player
-                {
-                    true
-                } else {
-                    false
-                }
-            }) {
-                return true;
-            }
-
-            let nearby_roads = (*ROAD_TO_CONNECTED_ROADS)
-                [usize::from(*road_id)]
-            .iter()
-            .filter(|r| connected_roads.contains(*r))
-            .collect::<Vec<_>>();
-
-            if nearby_roads.len() != 2 {
-                return true;
-            }
-
-            // The road is only connected to two roads, and they are connected to the different ends of
-            // the road, then this road is a "PASS THROUGH" node.
-            ROAD_TO_ROAD_CONNECTION.get(road_id, nearby_roads[0])
-                == ROAD_TO_ROAD_CONNECTION.get(road_id, nearby_roads[1])
-        })
-        .collect::<Vec<_>>();
+    let mut starting_roads = RoadSet::new();
+    for road_id in connected_roads.iter() {
+        if is_starting_road(board, player, road_id, connected_roads) {
+            starting_roads.insert(road_id);
+        }
+    }
 
     if starting_roads.is_empty() {
-        starting_roads = connected_roads.iter().collect::<Vec<_>>();
+        starting_roads = connected_roads;
     }
 
     // Now find the longest path starting from each of the "starting_nodes".
     starting_roads
-        .into_iter()
+        .iter()
         .map(|starting_node| {
-            let mut current_checked = AHashSet::<RoadId>::new();
+            let mut current_checked = RoadSet::new();
             dfs_for_longest_road(
                 board,
                 player,
-                *starting_node,
+                starting_node,
                 None,
                 &mut current_checked,
-                &connected_roads,
+                connected_roads,
             )
         })
         .max()
         .unwrap_or(0u8)
+}
+
+fn is_starting_road(
+    board: &CompactBoardState,
+    player: PlayerId,
+    road_id: RoadId,
+    connected_roads: RoadSet,
+) -> bool {
+    // One of the road end is occupied by the other settlement.
+    let nodes = (*ROAD_TO_NODES)[usize::from(road_id)];
+    if nodes.iter().any(|n| {
+        board
+            .get_node_owner(*n)
+            .is_some_and(|owner| owner != player)
+    }) {
+        return true;
+    }
+
+    // A road touches at most two other roads on each of its ends.
+    let nearby_roads = (*ROAD_TO_CONNECTED_ROADS)[usize::from(road_id)]
+        .iter()
+        .filter(|r| connected_roads.contains(**r))
+        .collect::<ArrayVec<_, 4>>();
+
+    if nearby_roads.len() != 2 {
+        return true;
+    }
+
+    // The road is only connected to two roads, and they are connected to the different ends of
+    // the road, then this road is a "PASS THROUGH" node.
+    ROAD_TO_ROAD_CONNECTION.get(&road_id, nearby_roads[0])
+        == ROAD_TO_ROAD_CONNECTION.get(&road_id, nearby_roads[1])
 }
 
 fn dfs_for_longest_road(
@@ -147,8 +154,8 @@ fn dfs_for_longest_road(
     current_player: PlayerId,
     current_road: RoadId,
     node_coming_from: Option<NodeId>,
-    current_checked: &mut AHashSet<RoadId>,
-    connected_roads: &AHashSet<RoadId>,
+    current_checked: &mut RoadSet,
+    connected_roads: RoadSet,
 ) -> u8 {
     current_checked.insert(current_road);
 
@@ -157,7 +164,7 @@ fn dfs_for_longest_road(
     let mut max_length = None;
 
     for road in nearby_roads {
-        if !connected_roads.contains(road) || current_checked.contains(road) {
+        if !connected_roads.contains(*road) || current_checked.contains(*road) {
             continue;
         }
 
@@ -189,7 +196,7 @@ fn dfs_for_longest_road(
         max_length = Some(max_length.map_or(length, |l: u8| l.max(length)))
     }
 
-    current_checked.remove(&current_road);
+    current_checked.remove(current_road);
     max_length.unwrap_or(0) + 1
 }
 
@@ -197,9 +204,9 @@ fn bfs_on_graph(
     board: &CompactBoardState,
     current_player: PlayerId,
     start: RoadId,
-    checked: &mut AHashSet<RoadId>,
-) -> AHashSet<RoadId> {
-    let mut connected = AHashSet::<RoadId>::new();
+    checked: &mut RoadSet,
+) -> RoadSet {
+    let mut connected = RoadSet::new();
     connected.insert(start);
     let mut roads_to_check = VecDeque::<RoadId>::from([start]);
 
@@ -209,7 +216,7 @@ fn bfs_on_graph(
         // Get the roads connected to the road.
         let nearby_roads = &(*ROAD_TO_CONNECTED_ROADS)[usize::from(current)];
         for next_road_id in nearby_roads {
-            if connected.contains(next_road_id) {
+            if connected.contains(*next_road_id) {
                 continue;
             }
 
@@ -234,6 +241,52 @@ fn bfs_on_graph(
     }
 
     connected
+}
+
+/// A set of roads, as one bit per road. There are only 72 roads, so the
+/// whole set fits in a `u128` and needs no hashing or allocation.
+#[derive(Clone, Copy)]
+struct RoadSet(u128);
+
+impl RoadSet {
+    fn new() -> Self {
+        Self(0)
+    }
+
+    fn bit(road_id: RoadId) -> u128 {
+        1 << usize::from(road_id)
+    }
+
+    fn insert(&mut self, road_id: RoadId) {
+        self.0 |= Self::bit(road_id);
+    }
+
+    fn remove(&mut self, road_id: RoadId) {
+        self.0 &= !Self::bit(road_id);
+    }
+
+    fn contains(&self, road_id: RoadId) -> bool {
+        self.0 & Self::bit(road_id) != 0
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+
+    /// The roads in the set, in the increasing order of the id.
+    fn iter(&self) -> impl Iterator<Item = RoadId> + use<> {
+        let mut remaining = self.0;
+        std::iter::from_fn(move || {
+            if remaining == 0 {
+                return None;
+            }
+
+            let road_index = remaining.trailing_zeros() as usize;
+            // Clears the lowest set bit.
+            remaining &= remaining - 1;
+            Some(RoadId::from(road_index))
+        })
+    }
 }
 
 /// Who owns each road and node, as one bit per (player, road) and
@@ -276,15 +329,13 @@ impl CompactBoardState {
     pub fn find_players_to_check(
         &self,
         check_against: &CompactBoardState,
-    ) -> AHashSet<PlayerId> {
-        let mut players_to_check = AHashSet::<PlayerId>::new();
+    ) -> [bool; 4] {
+        // Indexed by the player.
+        let mut players_to_check = [false; 4];
 
         // Changes in the nodes;
         let modified_nodes = self.nodes ^ check_against.nodes;
-        let modified_nodes_indices =
-            modified_nodes.iter_ones().collect::<Vec<_>>();
-
-        for node_index in modified_nodes_indices {
+        for node_index in modified_nodes.iter_ones() {
             let node_player = PlayerId::from(node_index / 54);
             let node_id = NodeId::from(node_index % 54);
 
@@ -292,23 +343,18 @@ impl CompactBoardState {
             let connecting_roads =
                 &(*NODE_TO_CONTAINING_ROADS)[usize::from(node_id)];
 
-            let enemy_road_connected_to_node = connecting_roads
-                .iter()
-                .map(|road_id| check_against.get_road_owner(*road_id))
-                .flatten()
-                .filter(|owner| owner != &node_player)
-                .collect::<Vec<_>>();
-
-            players_to_check.extend(enemy_road_connected_to_node);
+            for road_id in connecting_roads {
+                if let Some(owner) = check_against.get_road_owner(*road_id)
+                    && owner != node_player
+                {
+                    players_to_check[usize::from(owner)] = true;
+                }
+            }
         }
 
         let modified_roads = self.roads ^ check_against.roads;
-        let modified_roads_indices =
-            modified_roads.iter_ones().collect::<Vec<_>>();
-
-        for road_index in modified_roads_indices {
-            let road_player = PlayerId::from(road_index / 72);
-            players_to_check.insert(road_player);
+        for road_index in modified_roads.iter_ones() {
+            players_to_check[road_index / 72] = true;
         }
 
         players_to_check
@@ -414,12 +460,12 @@ mod tests {
         from: &CompactBoardState,
         to: &CompactBoardState,
     ) -> Vec<PlayerId> {
-        let mut players = from
-            .find_players_to_check(to)
+        from.find_players_to_check(to)
             .into_iter()
-            .collect::<Vec<_>>();
-        players.sort();
-        players
+            .enumerate()
+            .filter(|(_, modified)| *modified)
+            .map(|(player, _)| PlayerId::from(player))
+            .collect()
     }
 
     #[test]
