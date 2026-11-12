@@ -17,15 +17,17 @@ use crate::action::Building;
 use crate::action::Resource;
 use crate::board::Board;
 use crate::player::Player;
-use crate::road::find_longest_road;
 use crate::table::TILE_TO_NODE;
 use crate::util::id::PlayerId;
 use crate::util::sample::choose_weighted;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 
+mod longest_road;
 mod resources;
 
+use longest_road::CompactBoardState;
+use longest_road::LongestRoadTracker;
 use resources::CARDS_PER_RESOURCE;
 
 static WINNING_VP: u8 = 10;
@@ -41,6 +43,10 @@ struct GameDetail {
 
     // Each player's longest road length, refreshed with the longest road.
     road_lengths: [u8; 4],
+
+    // Remembers the board of the last computation, so that only the players
+    // whose roads could have changed are searched again.
+    longest_road_tracker: LongestRoadTracker,
 }
 
 impl GameDetail {
@@ -51,6 +57,7 @@ impl GameDetail {
             vp: VictoryPoint::new(ArrayVec::from([0; 4])),
             total_turns: 0,
             road_lengths: [0; 4],
+            longest_road_tracker: LongestRoadTracker::new(),
         }
     }
 
@@ -800,8 +807,7 @@ impl Game {
 
         // owed[resource][player]
         let mut owed = [[0u8; 4]; 5];
-        for (player, resource, num) in self.board.get_matching_resources(dice)
-        {
+        for (player, resource, num) in self.board.get_matching_resources(dice) {
             owed[resource as usize][usize::from(player)] += num;
         }
 
@@ -882,8 +888,11 @@ impl Game {
     }
 
     fn compute_longest_road(&mut self) {
-        let longest_road = find_longest_road(&self.board);
-        let longest_length = *longest_road.iter().max().unwrap() as u8;
+        let longest_road = self
+            .game_detail
+            .longest_road_tracker
+            .find_longest_road(&CompactBoardState::from(&self.board));
+        let longest_length = *longest_road.iter().max().unwrap();
         for (i, length) in longest_road.iter().enumerate() {
             self.game_detail.road_lengths[i] = *length;
         }
@@ -1416,9 +1425,12 @@ mod tests {
     fn production_is_skipped_when_bank_is_short_for_multiple_players() {
         let mut game = game_with_ore_and_lumber_on_5(5);
         // Player 0 is owed 4 ore, player 1 is owed 2 ore: 6 > 5.
-        game.board.build_structure(NodeId::new(0), p(0), Building::City);
-        game.board.build_structure(NodeId::new(7), p(0), Building::City);
-        game.board.build_structure(NodeId::new(12), p(1), Building::City);
+        game.board
+            .build_structure(NodeId::new(0), p(0), Building::City);
+        game.board
+            .build_structure(NodeId::new(7), p(0), Building::City);
+        game.board
+            .build_structure(NodeId::new(12), p(1), Building::City);
         // Player 2 is owed 1 lumber, which the bank can pay.
         game.board
             .build_structure(NodeId::new(1), p(2), Building::Settlement);
@@ -1438,9 +1450,12 @@ mod tests {
     fn single_receiver_takes_what_is_left_when_bank_is_short() {
         let mut game = game_with_ore_and_lumber_on_5(5);
         // Player 0 is the only one owed ore: 6 > 5.
-        game.board.build_structure(NodeId::new(0), p(0), Building::City);
-        game.board.build_structure(NodeId::new(7), p(0), Building::City);
-        game.board.build_structure(NodeId::new(12), p(0), Building::City);
+        game.board
+            .build_structure(NodeId::new(0), p(0), Building::City);
+        game.board
+            .build_structure(NodeId::new(7), p(0), Building::City);
+        game.board
+            .build_structure(NodeId::new(12), p(0), Building::City);
 
         game.handle_non_7_dice_roll(5);
 
@@ -1451,9 +1466,12 @@ mod tests {
     #[test]
     fn production_is_paid_in_full_when_bank_has_exactly_enough() {
         let mut game = game_with_ore_and_lumber_on_5(6);
-        game.board.build_structure(NodeId::new(0), p(0), Building::City);
-        game.board.build_structure(NodeId::new(7), p(0), Building::City);
-        game.board.build_structure(NodeId::new(12), p(1), Building::City);
+        game.board
+            .build_structure(NodeId::new(0), p(0), Building::City);
+        game.board
+            .build_structure(NodeId::new(7), p(0), Building::City);
+        game.board
+            .build_structure(NodeId::new(12), p(1), Building::City);
 
         game.handle_non_7_dice_roll(5);
 
@@ -1644,9 +1662,11 @@ mod tests {
 
         // Player 1 (8 cards, target 4) should discard first.
         let actions = game.get_actions();
-        assert!(actions
-            .iter()
-            .all(|a| matches!(a, Action::DiscardResource(_))));
+        assert!(
+            actions
+                .iter()
+                .all(|a| matches!(a, Action::DiscardResource(_)))
+        );
         assert_eq!(game.current_player, 1);
 
         game.run_action(Action::DiscardResource(Resource::Brick));
@@ -1663,9 +1683,11 @@ mod tests {
 
         // Player 2 (9 cards, target 5) should discard next.
         let actions = game.get_actions();
-        assert!(actions
-            .iter()
-            .all(|a| matches!(a, Action::DiscardResource(_))));
+        assert!(
+            actions
+                .iter()
+                .all(|a| matches!(a, Action::DiscardResource(_)))
+        );
         assert_eq!(game.current_player, 2);
 
         game.run_action(Action::DiscardResource(Resource::Ore));
@@ -1943,9 +1965,11 @@ mod tests {
         game.run_action(Action::UseDevCard(DevCard::YearOfPlenty));
 
         let actions = game.get_actions();
-        assert!(actions
-            .iter()
-            .all(|a| matches!(a, Action::YearOfPlentyGetResource(_))));
+        assert!(
+            actions
+                .iter()
+                .all(|a| matches!(a, Action::YearOfPlentyGetResource(_)))
+        );
         game.run_action(Action::YearOfPlentyGetResource(Resource::Ore));
 
         let actions = game.get_actions();

@@ -1,12 +1,24 @@
+use numpy::IntoPyArray;
+use numpy::PyArray1;
+use numpy::PyArray2;
 use numpy::ndarray::Array2;
-use numpy::{IntoPyArray, PyArray1, PyArray2};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use rcatan::{
-    Action, Building, DevCard, Engine, FullState, OtherPlayerCardEstimates,
-    Phase, PlayerId, ROAD_TO_NODES, RelativePlayerId, Resource, State,
-    TILE_TO_NODE, TileType, port_at_node,
-};
+use rcatan::Action;
+use rcatan::Building;
+use rcatan::DevCard;
+use rcatan::Engine;
+use rcatan::FullState;
+use rcatan::OtherPlayerCardEstimates;
+use rcatan::Phase;
+use rcatan::PlayerId;
+use rcatan::ROAD_TO_NODES;
+use rcatan::RelativePlayerId;
+use rcatan::Resource;
+use rcatan::State;
+use rcatan::TILE_TO_NODE;
+use rcatan::TileType;
+use rcatan::port_at_node;
 
 // Action space layout (300 total):
 //   [  0,  72)  BuildRoad(road_id)
@@ -143,7 +155,11 @@ const PIPS: [f32; 11] = [1., 2., 3., 4., 5., 6., 5., 4., 3., 2., 1.];
 
 // Slot of a dice number in the 10-wide per-number features (7 has none).
 fn dice_slot(dice: u8) -> usize {
-    if dice < 7 { dice as usize - 2 } else { dice as usize - 3 }
+    if dice < 7 {
+        dice as usize - 2
+    } else {
+        dice as usize - 3
+    }
 }
 
 fn state_to_vec(state: State) -> Vec<f32> {
@@ -224,7 +240,8 @@ fn state_to_vec(state: State) -> Vec<f32> {
     let start = v.len();
     v.extend([0.0f32; 50]);
     for dice in (2..=12u8).filter(|&d| d != 7) {
-        for (player, resource, cards) in state.board.get_matching_resources(dice)
+        for (player, resource, cards) in
+            state.board.get_matching_resources(dice)
         {
             if player == state.current_player {
                 v[start + resource as usize * 10 + dice_slot(dice)] +=
@@ -291,7 +308,11 @@ fn state_to_vec(state: State) -> Vec<f32> {
     for &count in &state.dev_cards_bought[current_idx] {
         v.push((count as f32 / 2.0).min(1.0));
     }
-    v.push(if state.used_dev_card_this_turn { 1.0 } else { 0.0 });
+    v.push(if state.used_dev_card_this_turn {
+        1.0
+    } else {
+        0.0
+    });
 
     // VPs, rotated. Only the current player's own VP cards are visible.
     for offset in 0..4 {
@@ -744,7 +765,9 @@ fn seat(player: usize) -> PyResult<PlayerId> {
 impl PyCardEstimator {
     #[new]
     fn new() -> Self {
-        Self { inner: OtherPlayerCardEstimates::new(true) }
+        Self {
+            inner: OtherPlayerCardEstimates::new(true),
+        }
     }
 
     /// `player` gained `count` cards of `resource`, seen by everyone.
@@ -754,8 +777,11 @@ impl PyCardEstimator {
         resource: usize,
         count: u8,
     ) -> PyResult<()> {
-        self.inner
-            .observe_gain_resource(seat(player)?, resource_at(resource)?, count);
+        self.inner.observe_gain_resource(
+            seat(player)?,
+            resource_at(resource)?,
+            count,
+        );
         Ok(())
     }
 
@@ -783,8 +809,11 @@ impl PyCardEstimator {
         victim: usize,
         resource: usize,
     ) -> PyResult<()> {
-        self.inner
-            .observe_steal(seat(thief)?, seat(victim)?, resource_at(resource)?);
+        self.inner.observe_steal(
+            seat(thief)?,
+            seat(victim)?,
+            resource_at(resource)?,
+        );
         Ok(())
     }
 

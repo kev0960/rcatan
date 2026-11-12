@@ -18,7 +18,8 @@ const REPORT_EVERY: usize = 250;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let batch: usize = args.next().map_or(32, |a| a.parse().expect("batch size"));
+    let batch: usize =
+        args.next().map_or(32, |a| a.parse().expect("batch size"));
     let steps: usize = args.next().map_or(1500, |a| a.parse().expect("steps"));
 
     let mut engine = Engine::new(batch, 0);
@@ -37,7 +38,8 @@ fn main() {
         games_finished += ended.iter().filter(|e| e.is_some()).count();
 
         if step % REPORT_EVERY == 0 {
-            let per_env = chunk_start.elapsed().as_secs_f64() / (REPORT_EVERY * batch) as f64;
+            let per_env = chunk_start.elapsed().as_secs_f64()
+                / (REPORT_EVERY * batch) as f64;
             println!(
                 "steps {:>5}-{:<5} {:>8.1} us per game-step  ({games_finished} games finished)",
                 step - REPORT_EVERY + 1,

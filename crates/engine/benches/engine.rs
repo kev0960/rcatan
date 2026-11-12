@@ -8,7 +8,10 @@
 
 use std::hint::black_box;
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::BenchmarkId;
+use criterion::Criterion;
+use criterion::criterion_group;
+use criterion::criterion_main;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 use rcatan::Engine;
@@ -40,9 +43,11 @@ fn random_play(c: &mut Criterion) {
     // Long games can take a while per iteration.
     group.sample_size(10);
     for steps in [100, 300, 1000] {
-        group.bench_with_input(BenchmarkId::from_parameter(steps), &steps, |b, &steps| {
-            b.iter(|| play(steps))
-        });
+        group.bench_with_input(
+            BenchmarkId::from_parameter(steps),
+            &steps,
+            |b, &steps| b.iter(|| play(steps)),
+        );
     }
     group.finish();
 }

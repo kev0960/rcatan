@@ -102,7 +102,6 @@ mod tests {
                 break;
             }
         }
-
     }
 
     #[test]

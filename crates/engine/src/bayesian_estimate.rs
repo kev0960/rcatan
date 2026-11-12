@@ -2,7 +2,9 @@ use ahash::AHashMap;
 use arrayvec::ArrayVec;
 use std::array::from_fn;
 
-use crate::{PlayerId, RelativePlayerId, Resource};
+use crate::PlayerId;
+use crate::RelativePlayerId;
+use crate::Resource;
 
 pub struct OtherPlayerCardEstimates {
     enable_estimation: bool,

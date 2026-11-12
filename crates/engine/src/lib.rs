@@ -6,7 +6,6 @@ mod game;
 mod game_viewer;
 mod player;
 mod reward;
-mod road;
 mod state;
 mod table;
 mod util;

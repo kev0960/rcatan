@@ -309,7 +309,8 @@ mod tests {
         let mut seen = HashSet::new();
         for [a, b] in *ROAD_TO_NODES {
             assert_ne!(a, b);
-            let (lo, hi) = (u8::from(a).min(u8::from(b)), u8::from(a).max(u8::from(b)));
+            let (lo, hi) =
+                (u8::from(a).min(u8::from(b)), u8::from(a).max(u8::from(b)));
             assert!(lo < 54 && hi < 54);
             assert!(seen.insert((lo, hi)), "duplicate road {lo}-{hi}");
         }

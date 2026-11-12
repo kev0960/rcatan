@@ -1,3 +1,3 @@
 pub mod id;
-pub mod vecset;
 pub mod sample;
+pub mod vecset;

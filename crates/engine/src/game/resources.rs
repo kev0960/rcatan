@@ -82,8 +82,11 @@ impl Game {
         self.players[usize::from(player)]
             .add_resource_card(resource, total_cards);
 
-        let hand_sizes: Vec<u8> =
-            self.players.iter().map(|p| p.num_resource_cards()).collect();
+        let hand_sizes: Vec<u8> = self
+            .players
+            .iter()
+            .map(|p| p.num_resource_cards())
+            .collect();
         self.other_player_card_estimates.observe_monopoly(
             player,
             resource,

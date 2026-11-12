@@ -830,12 +830,14 @@ mod tests {
         p.cards[DevCard::YearOfPlenty as usize] = 1;
 
         let playable = Action::UseDevCard(DevCard::YearOfPlenty);
-        assert!(p
-            .get_available_actions(&board, &[0u8; 5], &[0, 0, 1, 0, 0])
-            .contains(&playable));
-        assert!(!p
-            .get_available_actions(&board, &[0u8; 5], &[0; 5])
-            .contains(&playable));
+        assert!(
+            p.get_available_actions(&board, &[0u8; 5], &[0, 0, 1, 0, 0])
+                .contains(&playable)
+        );
+        assert!(
+            !p.get_available_actions(&board, &[0u8; 5], &[0; 5])
+                .contains(&playable)
+        );
     }
 
     #[test]
@@ -1006,7 +1008,8 @@ mod tests {
             let mut p = Player::new(p0());
             p.add_resource_card(resource, 2);
 
-            let mut actions = p.get_available_actions(&board, &[0u8; 5], &[19; 5]);
+            let mut actions =
+                p.get_available_actions(&board, &[0u8; 5], &[19; 5]);
             actions.sort();
             assert_eq!(
                 actions,

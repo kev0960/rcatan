@@ -1,6 +1,9 @@
 use once_cell::sync::Lazy;
 
-use crate::{Building, NodeId, RoadId, board::Board};
+use crate::Building;
+use crate::NodeId;
+use crate::RoadId;
+use crate::board::Board;
 
 const TEMPLATE: &str = r#"
                51        52        53               
@@ -284,10 +287,7 @@ C1        S2        C3        S0        C1        S2
               \S0/      \C1/      \S2/"#;
 
         let normalize = |s: &str| {
-            s.lines()
-                .map(str::trim_end)
-                .collect::<Vec<_>>()
-                .join("\n")
+            s.lines().map(str::trim_end).collect::<Vec<_>>().join("\n")
         };
         assert_eq!(normalize(&output), normalize(expected));
     }
